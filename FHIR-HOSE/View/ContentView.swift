@@ -24,15 +24,15 @@ struct ContentView: View {
             NavigationView {
                 
                 // TODO: REMOVE THIS - right now this blocks some function but is here to show healthkit capability
-                Button(action: fetchHealthData) {
-                                Text("Fetch Now")
-                                    .font(.headline)
-                                    .padding()
-                                    .frame(maxWidth: .infinity)
-                                    .background(Color.green)
-                                    .foregroundColor(.white)
-                                    .cornerRadius(10)
-                            }
+                //Button(action: fetchHealthData) {
+                  //              Text("Fetch Now")
+                    //                .font(.headline)
+                      //              .padding()
+                        //            .frame(maxWidth: .infinity)
+                          //          .background(Color.green)
+                            //        .foregroundColor(.white)
+                              //      .cornerRadius(10)
+                       //     }
                 
                 RecordsListView(recordStore: recordStore)
                     .navigationTitle("Health Records")
