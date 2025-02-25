@@ -406,9 +406,13 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"FHIR-HOSE/Preview Content\"";
+				DEVELOPMENT_TEAM = BLTK8XG6V7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "FHIR-HOSE/Info.plist";
+				INFOPLIST_KEY_NSDocumentsFolderUsageDescription = "We need access to store your health records.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "We need access to upload medical records.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "We need access to upload medical images.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -445,9 +449,13 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"FHIR-HOSE/Preview Content\"";
+				DEVELOPMENT_TEAM = BLTK8XG6V7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "FHIR-HOSE/Info.plist";
+				INFOPLIST_KEY_NSDocumentsFolderUsageDescription = "We need access to store your health records.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "We need access to upload medical records.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "We need access to upload medical images.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;

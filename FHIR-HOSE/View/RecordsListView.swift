@@ -13,7 +13,7 @@ struct RecordsListView: View {
     var body: some View {
         List {
             ForEach(recordStore.records) { record in
-                NavigationLink(destination: RecordDetailView(record: record)) {
+                NavigationLink(destination: ProcessedRecordView(record: record)) {
                     RecordRowView(record: record)
                 }
             }

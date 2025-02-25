@@ -16,7 +16,7 @@ struct RecordDetailView: View {
             // In the future, this will show processed FHIR data
             Group {
                 if record.processed {
-                    ProcessedRecordView()
+                    ProcessedRecordView(record: record)
                 } else {
                     UnprocessedRecordView()
                 }
