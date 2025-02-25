@@ -14,8 +14,12 @@ struct HealthRecord: Identifiable {
     var processed: Bool = false
     var date: Date = Date()
     
+    // ADD: an optional dictionary for FHIR fields
+    var fhirData: [String: Any]? = nil
+
     enum RecordType {
         case pdf
         case image
     }
 }
+
