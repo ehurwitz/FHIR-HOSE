@@ -66,6 +66,16 @@ struct HomeView: View {
                     )
                 }
                 .buttonStyle(PlainButtonStyle())
+                
+                NavigationLink(destination: COPDView(records: recordStore.records)) {
+                    HealthAppCard(
+                        title: "COPD Prediction",
+                        subtitle: "Generate prediction data",
+                        systemImage: "lungs.fill",
+                        color: .blue
+                    )
+                }
+                .buttonStyle(PlainButtonStyle())
             }
             .padding()
         }
@@ -102,5 +112,3 @@ struct HealthAppCard: View {
         .cornerRadius(12)
     }
 }
-
-

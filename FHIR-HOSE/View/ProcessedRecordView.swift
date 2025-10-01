@@ -84,11 +84,115 @@ struct RawJSONView: View {
     }
     
     private func prettyPrintedJSON(_ dict: [String: Any]) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]),
-              let string = String(data: data, encoding: .utf8) else {
-            return "\(dict)"
+        // Convert the dictionary to JSON-serializable format first
+        let jsonSerializableDict = makeJSONSerializable(dict)
+        
+        do {
+            let data = try JSONSerialization.data(withJSONObject: jsonSerializableDict, options: [.prettyPrinted, .sortedKeys])
+            return String(data: data, encoding: .utf8) ?? "Failed to encode JSON"
+        } catch {
+            // Fallback to string representation if JSON serialization fails
+            return "JSON Serialization Error: \(error.localizedDescription)\n\nRaw Data:\n\(formatDictionaryAsString(dict))"
         }
-        return string
+    }
+    
+    /// Convert any dictionary to JSON-serializable format
+    private func makeJSONSerializable(_ value: Any) -> Any {
+        switch value {
+        case let dict as [String: Any]:
+            var result: [String: Any] = [:]
+            for (key, val) in dict {
+                result[key] = makeJSONSerializable(val)
+            }
+            return result
+            
+        case let array as [Any]:
+            return array.map { makeJSONSerializable($0) }
+            
+        case let date as Date:
+            let formatter = ISO8601DateFormatter()
+            return formatter.string(from: date)
+            
+        case let url as URL:
+            return url.absoluteString
+            
+        case let data as Data:
+            return data.base64EncodedString()
+            
+        case is String, is Int, is Double, is Float, is Bool:
+            return value
+            
+        case let optional as (Any?):
+            if let unwrapped = optional {
+                return makeJSONSerializable(unwrapped)
+            } else {
+                return NSNull()
+            }
+            
+        default:
+            // For any other type, convert to string
+            return String(describing: value)
+        }
+    }
+    
+    /// Decode base64-encoded FHIR resource to actual JSON object
+    private func decodeFHIRResource(_ base64String: String) -> [String: Any]? {
+        guard let data = Data(base64Encoded: base64String) else {
+            // If it's not base64, try to parse as direct JSON string
+            guard let jsonData = base64String.data(using: .utf8) else { return nil }
+            return try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any]
+        }
+        
+        // Try to parse the decoded data as JSON
+        do {
+            return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        } catch {
+            // If JSON parsing fails, try treating the decoded data as a JSON string
+            if let jsonString = String(data: data, encoding: .utf8),
+               let jsonData = jsonString.data(using: .utf8) {
+                return try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any]
+            }
+            return nil
+        }
+    }
+    
+    /// Fallback method to format dictionary as readable string
+    private func formatDictionaryAsString(_ dict: [String: Any]) -> String {
+        let sortedKeys = dict.keys.sorted()
+        var result = "{\n"
+        
+        for key in sortedKeys {
+            let value = dict[key]
+            result += "  \"\(key)\": \(formatValueAsString(value)),\n"
+        }
+        
+        if result.hasSuffix(",\n") {
+            result.removeLast(2)
+            result += "\n"
+        }
+        
+        result += "}"
+        return result
+    }
+    
+    /// Format any value as a readable string
+    private func formatValueAsString(_ value: Any?) -> String {
+        guard let value = value else { return "null" }
+        
+        switch value {
+        case let string as String:
+            return "\"\(string)\""
+        case let date as Date:
+            let formatter = ISO8601DateFormatter()
+            return "\"\(formatter.string(from: date))\""
+        case let dict as [String: Any]:
+            return formatDictionaryAsString(dict)
+        case let array as [Any]:
+            let items = array.map { formatValueAsString($0) }.joined(separator: ", ")
+            return "[\(items)]"
+        default:
+            return "\(value)"
+        }
     }
 }
 
