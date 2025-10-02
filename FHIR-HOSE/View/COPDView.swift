@@ -123,6 +123,7 @@ struct COPDSurveySheet: View {
     let jsonString: String
     let healthRecords: [HealthRecord]
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var healthKitManager = HealthKitManager()
     
     // Prediction state
     @State private var predictionResult: COPDPredictionResult?
@@ -138,8 +139,14 @@ struct COPDSurveySheet: View {
     @State private var cardiovascularDisease: Int = 2 // 0 = No, 1 = Yes, 2 = Prefer not to answer
     @State private var smokingStatus: Int = 2 // 0 = No, 1 = Yes, 2 = Prefer not to answer
     @State private var alcoholUse: Int = 2 // 0 = No, 1 = Yes, 2 = Prefer not to answer
-    @State private var bmi: Double = 25.0 // Default BMI, user can override
-    @State private var ageAtTime0: Int = 35 // Default from HealthKit, but user can override
+    @State private var bmi: Double = 0 // Default BMI, user can override
+    @State private var ageAtTime0: Int = 0 // Default from HealthKit, but user can override
+    
+    // BMI and HealthKit state
+    @State private var isFetchingBMI = false
+    @State private var showBMIInputSheet = false
+    @State private var heightInMeters: Double = 1.7 // Default height for input
+    @State private var weightInKg: Double = 70.0 // Default weight for input
     
     // Validation state
     @State private var showValidationWarning = false
@@ -234,14 +241,37 @@ struct COPDSurveySheet: View {
                                     subtitle: "BMI is calculated from height and weight",
                                     isFromHealthKit: true
                                 ) {
-                                    HStack {
-                                        TextField("BMI", value: $bmi, formatter: NumberFormatter())
-                                            .textFieldStyle(.roundedBorder)
-                                            .keyboardType(.decimalPad)
-                                            .frame(width: 80)
-                                        Text("kg/m²")
-                                            .foregroundColor(.secondary)
-                                        Spacer()
+                                    VStack(alignment: .leading, spacing: 12) {
+                                        HStack {
+                                            if isFetchingBMI {
+                                                ProgressView()
+                                                    .scaleEffect(0.8)
+                                                Text("Fetching from HealthKit...")
+                                                    .foregroundColor(.secondary)
+                                                Spacer()
+                                            } else {
+                                                TextField("BMI", value: $bmi, formatter: NumberFormatter())
+                                                    .textFieldStyle(.roundedBorder)
+                                                    .keyboardType(.decimalPad)
+                                                    .frame(width: 80)
+                                                Text("kg/m²")
+                                                    .foregroundColor(.secondary)
+                                                Spacer()
+                                            }
+                                        }
+                                        
+                                        if bmi == 0 && !isFetchingBMI {
+                                            Button(action: {
+                                                showBMIInputSheet = true
+                                            }) {
+                                                HStack {
+                                                    Image(systemName: "plus.circle.fill")
+                                                    Text("Enter Height & Weight")
+                                                }
+                                                .font(.subheadline)
+                                                .foregroundColor(.blue)
+                                            }
+                                        }
                                     }
                                 }
                                 
@@ -376,6 +406,14 @@ struct COPDSurveySheet: View {
                 COPDResultsView(
                     predictionResult: predictionResult,
                     predictionError: predictionError
+                )
+            }
+            .sheet(isPresented: $showBMIInputSheet) {
+                BMIInputSheet(
+                    heightInMeters: $heightInMeters,
+                    weightInKg: $weightInKg,
+                    onSave: saveBMIData,
+                    onCancel: { showBMIInputSheet = false }
                 )
             }
             .toolbar {
@@ -676,6 +714,12 @@ struct COPDSurveySheet: View {
     private func initializeHealthData() {
         print("🔍 Initializing health data from \(healthRecords.count) records...")
         
+        // First, try to fetch BMI directly from HealthKit using HealthKitManager
+        fetchBMIFromHealthKit()
+        
+        // Fetch age and sex directly from HealthKit
+        fetchAgeAndSexFromHealthKit()
+        
         // Extract data from HealthKit records
         for record in healthRecords {
             if let healthKitData = record.healthKitData,
@@ -883,6 +927,270 @@ struct COPDSurveySheet: View {
                 }
             }
         }
+    }
+    
+    // MARK: - BMI Fetching Functions
+    
+    private func fetchBMIFromHealthKit() {
+        print("🔍 Fetching BMI from HealthKit...")
+        isFetchingBMI = true
+        
+        healthKitManager.fetchOrCalculateBMI { bmiValue in
+            DispatchQueue.main.async {
+                self.isFetchingBMI = false
+                
+                if let bmiValue = bmiValue {
+                    self.bmi = bmiValue
+                    print("✅ Successfully fetched BMI from HealthKit: \(bmiValue)")
+                } else {
+                    print("⚠️ No BMI found in HealthKit - will prompt user for height/weight")
+                    self.showBMIInputSheet = true
+                }
+            }
+        }
+    }
+    
+    private func saveBMIData() {
+        print("💾 Saving height (\(heightInMeters)m) and weight (\(weightInKg)kg) to HealthKit...")
+        
+        healthKitManager.saveHeightWeightAndCalculateBMI(
+            heightInMeters: heightInMeters,
+            weightInKg: weightInKg
+        ) { calculatedBMI in
+            DispatchQueue.main.async {
+                if let calculatedBMI = calculatedBMI {
+                    self.bmi = calculatedBMI
+                    self.showBMIInputSheet = false
+                    print("✅ Successfully saved data and calculated BMI: \(calculatedBMI)")
+                } else {
+                    print("❌ Failed to save BMI data to HealthKit")
+                    // Still calculate BMI locally if HealthKit save fails
+                    let calculatedBMI = self.weightInKg / pow(self.heightInMeters, 2)
+                    self.bmi = calculatedBMI
+                    self.showBMIInputSheet = false
+                }
+            }
+        }
+    }
+    
+    private func fetchAgeAndSexFromHealthKit() {
+        print("🔍 Fetching age and sex from HealthKit...")
+        
+        // Fetch biological sex
+        do {
+            let biologicalSex = try healthKitManager.healthStore.biologicalSex()
+            switch biologicalSex.biologicalSex {
+            case .female:
+                sexAtBirth = 0
+                print("✅ Fetched sex from HealthKit: Female")
+            case .male:
+                sexAtBirth = 1
+                print("✅ Fetched sex from HealthKit: Male")
+            case .other:
+                sexAtBirth = 2
+                print("⚠️ Fetched sex from HealthKit: Other (setting to prefer not to answer)")
+            case .notSet:
+                print("⚠️ Biological sex not set in HealthKit")
+            @unknown default:
+                print("⚠️ Unknown biological sex value from HealthKit")
+            }
+        } catch {
+            print("❌ Error fetching biological sex: \(error.localizedDescription)")
+        }
+        
+        // Fetch date of birth and calculate age
+        do {
+            if let birthDate = try healthKitManager.healthStore.dateOfBirthComponents().date {
+                let age = Calendar.current.dateComponents([.year], from: birthDate, to: Date()).year ?? 0
+                if age > 0 {
+                    ageAtTime0 = age
+                    print("✅ Fetched age from HealthKit: \(age)")
+                } else {
+                    print("⚠️ Invalid age calculated from birth date")
+                }
+            }
+        } catch {
+            print("❌ Error fetching date of birth: \(error.localizedDescription)")
+        }
+    }
+}
+
+struct BMIInputSheet: View {
+    @Binding var heightInMeters: Double
+    @Binding var weightInKg: Double
+    let onSave: () -> Void
+    let onCancel: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    
+    // Imperial unit states
+    @State private var feet: Int = 5
+    @State private var inches: Int = 9
+    @State private var pounds: Int = 154
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                VStack(spacing: 12) {
+                    Image(systemName: "figure.stand")
+                        .font(.system(size: 50))
+                        .foregroundColor(.blue)
+                    
+                    Text("Height & Weight")
+                        .font(.title)
+                        .fontWeight(.bold)
+                    
+                    Text("We need your height and weight to calculate BMI. This data will be saved to Apple Health.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 24)
+                }
+                .padding(.top, 8)
+                
+                HStack(spacing: 32) {
+                    // Height Section
+                    VStack(spacing: 8) {
+                        Text("Height")
+                            .font(.headline)
+                        
+                        HStack(spacing: 4) {
+                            // Feet picker
+                            Picker("Feet", selection: $feet) {
+                                ForEach(3...8, id: \.self) { foot in
+                                    Text("\(foot)").tag(foot)
+                                }
+                            }
+                            .pickerStyle(.wheel)
+                            .frame(width: 50, height: 100)
+                            .clipped()
+                            
+                            Text("ft")
+                                .font(.body)
+                                .foregroundColor(.secondary)
+                                .frame(width: 20)
+                            
+                            // Inches picker
+                            Picker("Inches", selection: $inches) {
+                                ForEach(0...11, id: \.self) { inch in
+                                    Text("\(inch)").tag(inch)
+                                }
+                            }
+                            .pickerStyle(.wheel)
+                            .frame(width: 50, height: 100)
+                            .clipped()
+                            
+                            Text("in")
+                                .font(.body)
+                                .foregroundColor(.secondary)
+                                .frame(width: 20)
+                        }
+                    }
+                    
+                    // Weight Section
+                    VStack(spacing: 8) {
+                        Text("Weight")
+                            .font(.headline)
+                        
+                        HStack(spacing: 4) {
+                            Picker("Weight", selection: $pounds) {
+                                ForEach(80...400, id: \.self) { pound in
+                                    Text("\(pound)").tag(pound)
+                                }
+                            }
+                            .pickerStyle(.wheel)
+                            .frame(width: 70, height: 100)
+                            .clipped()
+                            
+                            Text("lbs")
+                                .font(.body)
+                                .foregroundColor(.secondary)
+                                .frame(width: 30)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                
+                VStack(spacing: 8) {
+                    Text("Calculated BMI")
+                        .font(.headline)
+                    Text(String(format: "%.1f", calculateBMI()))
+                        .font(.title)
+                        .fontWeight(.bold)
+                        .foregroundColor(.blue)
+                }
+                .padding()
+                .background(Color.blue.opacity(0.1))
+                .cornerRadius(12)
+                .padding(.horizontal)
+                .padding(.bottom, 20)
+                
+                HStack(spacing: 16) {
+                    Button("Cancel") {
+                        onCancel()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.gray.opacity(0.2))
+                    .foregroundColor(.primary)
+                    .cornerRadius(12)
+                    
+                    Button("Save to Health") {
+                        convertAndSave()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.blue)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+            }
+            .navigationBarHidden(true)
+            .onAppear {
+                initializeFromMetricValues()
+            }
+        }
+    }
+    
+    // MARK: - Helper Functions
+    
+    private func initializeFromMetricValues() {
+        // Convert existing metric values to imperial for display
+        if heightInMeters > 0 {
+            let totalInches = heightInMeters * 39.3701 // meters to inches
+            feet = Int(totalInches / 12)
+            inches = Int(totalInches.truncatingRemainder(dividingBy: 12))
+        }
+        
+        if weightInKg > 0 {
+            pounds = Int(weightInKg * 2.20462) // kg to pounds
+        }
+    }
+    
+    private func calculateBMI() -> Double {
+        let heightInMeters = convertHeightToMeters()
+        let weightInKg = convertWeightToKg()
+        return weightInKg / (heightInMeters * heightInMeters)
+    }
+    
+    private func convertHeightToMeters() -> Double {
+        let totalInches = Double(feet * 12 + inches)
+        return totalInches * 0.0254 // inches to meters
+    }
+    
+    private func convertWeightToKg() -> Double {
+        return Double(pounds) * 0.453592 // pounds to kg
+    }
+    
+    private func convertAndSave() {
+        // Update the binding values with converted metric values
+        heightInMeters = convertHeightToMeters()
+        weightInKg = convertWeightToKg()
+        
+        // Call the save function
+        onSave()
     }
 }
 
@@ -1115,11 +1423,5 @@ struct COPDResultsView: View {
         } else {
             return "Your risk is relatively low based on the current assessment. Continue maintaining healthy lifestyle choices."
         }
-    }
-}
-
-#Preview {
-    NavigationView {
-        COPDView(records: [])
     }
 }

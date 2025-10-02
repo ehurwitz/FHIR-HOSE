@@ -36,8 +36,9 @@ class HealthKitManager: ObservableObject {
     
     func requestAuthorization(completion: @escaping (Bool, Error?) -> Void) {
         var typesToRead = Set<HKObjectType>()
+        var typesToWrite = Set<HKSampleType>()
         
-        // Add characteristic types
+        // Add characteristic types (read-only)
         typesToRead.insert(HKObjectType.characteristicType(forIdentifier: .dateOfBirth)!)
         typesToRead.insert(HKObjectType.characteristicType(forIdentifier: .biologicalSex)!)
         typesToRead.insert(HKObjectType.characteristicType(forIdentifier: .bloodType)!)
@@ -45,7 +46,7 @@ class HealthKitManager: ObservableObject {
         print("🔐 Requesting HealthKit authorization...")
         print("📊 Requesting \(quantityTypes.count) quantity types including BMI")
         
-        // Add quantity types
+        // Add quantity types for reading
         for identifier in quantityTypes {
             if let type = HKObjectType.quantityType(forIdentifier: identifier) {
                 typesToRead.insert(type)
@@ -53,6 +54,20 @@ class HealthKitManager: ObservableObject {
             } else {
                 print("   ❌ Failed to create quantity type: \(identifier.rawValue)")
             }
+        }
+        
+        // Add write permissions for BMI, height, and weight
+        if let bmiType = HKObjectType.quantityType(forIdentifier: .bodyMassIndex) {
+            typesToWrite.insert(bmiType)
+            print("   ✅ Added write permission for BMI")
+        }
+        if let heightType = HKObjectType.quantityType(forIdentifier: .height) {
+            typesToWrite.insert(heightType)
+            print("   ✅ Added write permission for height")
+        }
+        if let weightType = HKObjectType.quantityType(forIdentifier: .bodyMass) {
+            typesToWrite.insert(weightType)
+            print("   ✅ Added write permission for weight")
         }
         
         // Add category types
@@ -86,10 +101,10 @@ class HealthKitManager: ObservableObject {
             print("   ✅ Added vital sign records (contains BMI)")
         }
         
-        print("📋 Total types to request: \(typesToRead.count)")
+        print("📋 Total types to request: \(typesToRead.count) read, \(typesToWrite.count) write")
         print("🔍 Types include: \(typesToRead.map { $0.identifier }.sorted())")
         
-        healthStore.requestAuthorization(toShare: nil, read: typesToRead) { success, error in
+        healthStore.requestAuthorization(toShare: typesToWrite, read: typesToRead) { success, error in
             completion(success, error)
         }
     }
@@ -465,6 +480,355 @@ class HealthKitManager: ObservableObject {
         } catch {
             fileLogger.error("Error retrieving name or birthday: \(error.localizedDescription)", category: "HealthKit")
             return nil
+        }
+    }
+    
+    /// Fetch BMI from HealthKit, or calculate and save it if missing
+    /// - Parameter completion: Returns the BMI value or nil if unable to determine
+    func fetchOrCalculateBMI(completion: @escaping (Double?) -> Void) {
+        print("🔍 fetchOrCalculateBMI() called")
+        guard let bmiType = HKObjectType.quantityType(forIdentifier: .bodyMassIndex) else {
+            print("❌ Unable to create BMI quantity type")
+            fileLogger.error("Unable to create BMI quantity type", category: "HealthKit")
+            DispatchQueue.main.async {
+                completion(nil)
+            }
+            return
+        }
+        
+        print("📊 Step 1: Querying HealthKit for existing BMI...")
+        // First, try to fetch existing BMI from HealthKit
+        let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: false)
+        let query = HKSampleQuery(
+            sampleType: bmiType,
+            predicate: nil,
+            limit: 1,
+            sortDescriptors: [sortDescriptor]
+        ) { [weak self] _, samples, error in
+            print("📥 BMI query completed")
+            
+            if let error = error {
+                print("❌ Error fetching BMI: \(error.localizedDescription)")
+                fileLogger.error("Error fetching BMI: \(error.localizedDescription)", category: "HealthKit")
+                DispatchQueue.main.async {
+                    completion(nil)
+                }
+                return
+            }
+            
+            // If we have a recent BMI value, use it
+            if let bmiSample = samples?.first as? HKQuantitySample {
+                let bmiValue = bmiSample.quantity.doubleValue(for: HKUnit.count())
+                print("✅ Found existing BMI in HealthKit: \(bmiValue)")
+                fileLogger.info("✅ Found existing BMI in HealthKit: \(bmiValue)", category: "HealthKit")
+                DispatchQueue.main.async {
+                    completion(bmiValue)
+                }
+                return
+            }
+            
+            // No BMI found, check if we have height and weight first
+            print("⚠️ No BMI found in HealthKit")
+            print("📊 Step 2: Checking for height and weight...")
+            self?.checkHeightAndWeightThenCalculate(completion: completion)
+        }
+        
+        print("🚀 Executing BMI query...")
+        healthStore.execute(query)
+    }
+    
+    /// Check if height and weight exist, then calculate BMI or return nil
+    private func checkHeightAndWeightThenCalculate(completion: @escaping (Double?) -> Void) {
+        print("📏 Checking for height...")
+        print("⚖️ Checking for weight...")
+        
+        let dispatchGroup = DispatchGroup()
+        var hasHeight = false
+        var hasWeight = false
+        var heightCheckCompleted = false
+        var weightCheckCompleted = false
+        
+        // Check for height with timeout
+        dispatchGroup.enter()
+        fetchMostRecentQuantity(for: .height) { height in
+            guard !heightCheckCompleted else { return }
+            heightCheckCompleted = true
+            hasHeight = (height != nil)
+            print("📏 Height check: \(hasHeight ? "EXISTS ✅" : "MISSING ❌")")
+            dispatchGroup.leave()
+        }
+        
+        // Timeout for height check (2 seconds)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            guard !heightCheckCompleted else { return }
+            heightCheckCompleted = true
+            print("⏱️ Height check timed out - assuming missing")
+            dispatchGroup.leave()
+        }
+        
+        // Check for weight with timeout
+        dispatchGroup.enter()
+        fetchMostRecentQuantity(for: .bodyMass) { weight in
+            guard !weightCheckCompleted else { return }
+            weightCheckCompleted = true
+            hasWeight = (weight != nil)
+            print("⚖️ Weight check: \(hasWeight ? "EXISTS ✅" : "MISSING ❌")")
+            dispatchGroup.leave()
+        }
+        
+        // Timeout for weight check (2 seconds)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            guard !weightCheckCompleted else { return }
+            weightCheckCompleted = true
+            print("⏱️ Weight check timed out - assuming missing")
+            dispatchGroup.leave()
+        }
+        
+        dispatchGroup.notify(queue: .main) { [weak self] in
+            print("📊 Height and weight check complete:")
+            print("   Height: \(hasHeight ? "✅ Available" : "❌ Missing")")
+            print("   Weight: \(hasWeight ? "✅ Available" : "❌ Missing")")
+            
+            if hasHeight && hasWeight {
+                print("✅ Both height and weight exist - proceeding to calculate BMI")
+                self?.calculateAndSaveBMI(completion: completion)
+            } else {
+                print("❌ Missing height or weight - cannot calculate BMI")
+                print("📝 User needs to provide missing data")
+                DispatchQueue.main.async {
+                    completion(nil)
+                }
+            }
+        }
+    }
+    
+    /// Calculate BMI from height and weight, then save to HealthKit
+    private func calculateAndSaveBMI(completion: @escaping (Double?) -> Void) {
+        print("🔍 calculateAndSaveBMI() called")
+        let dispatchGroup = DispatchGroup()
+        var heightInMeters: Double?
+        var weightInKg: Double?
+        
+        // Fetch height
+        print("📏 Fetching height from HealthKit...")
+        dispatchGroup.enter()
+        fetchMostRecentQuantity(for: .height) { height in
+            print("📏 Height fetch completed: \(height?.description ?? "nil")")
+            heightInMeters = height
+            dispatchGroup.leave()
+        }
+        
+        // Fetch weight
+        print("⚖️ Fetching weight from HealthKit...")
+        dispatchGroup.enter()
+        fetchMostRecentQuantity(for: .bodyMass) { weight in
+            print("⚖️ Weight fetch completed: \(weight?.description ?? "nil")")
+            weightInKg = weight
+            dispatchGroup.leave()
+        }
+        
+        print("⏳ Waiting for height and weight queries to complete...")
+        
+        dispatchGroup.notify(queue: .main) { [weak self] in
+            print("📊 Height fetch result: \(heightInMeters?.description ?? "nil")")
+            print("📊 Weight fetch result: \(weightInKg?.description ?? "nil")")
+            
+            guard let height = heightInMeters, let weight = weightInKg else {
+                print("❌ Cannot calculate BMI - missing data")
+                fileLogger.error("Unable to calculate BMI: missing height (\(heightInMeters?.description ?? "nil")) or weight (\(weightInKg?.description ?? "nil"))", category: "HealthKit")
+                print("🔙 Calling completion with nil to trigger input sheet")
+                completion(nil)
+                return
+            }
+            
+            // Calculate BMI: weight (kg) / height² (m²)
+            let bmi = weight / (height * height)
+            fileLogger.info("📊 Calculated BMI: \(bmi) from height: \(height)m, weight: \(weight)kg", category: "HealthKit")
+            
+            // Save BMI to HealthKit
+            self?.saveBMIToHealthKit(bmi: bmi) { success in
+                if success {
+                    fileLogger.info("✅ Successfully saved BMI to HealthKit: \(bmi)", category: "HealthKit")
+                    completion(bmi)
+                } else {
+                    fileLogger.error("❌ Failed to save BMI to HealthKit, but returning calculated value: \(bmi)", category: "HealthKit")
+                    // Still return the calculated value even if save failed
+                    completion(bmi)
+                }
+            }
+        }
+    }
+    
+    /// Fetch the most recent quantity sample for a given type
+    private func fetchMostRecentQuantity(for identifier: HKQuantityTypeIdentifier, completion: @escaping (Double?) -> Void) {
+        print("🔍 fetchMostRecentQuantity for \(identifier.rawValue)")
+        guard let quantityType = HKObjectType.quantityType(forIdentifier: identifier) else {
+            print("❌ Could not create quantity type for \(identifier.rawValue)")
+            completion(nil)
+            return
+        }
+        
+        let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: false)
+        let query = HKSampleQuery(
+            sampleType: quantityType,
+            predicate: nil,
+            limit: 1,
+            sortDescriptors: [sortDescriptor]
+        ) { _, samples, error in
+            print("📥 Query completed for \(identifier.rawValue)")
+            
+            if let error = error {
+                print("❌ Error fetching \(identifier.rawValue): \(error.localizedDescription)")
+                fileLogger.error("Error fetching \(identifier.rawValue): \(error.localizedDescription)", category: "HealthKit")
+                completion(nil)
+                return
+            }
+            
+            guard let sample = samples?.first as? HKQuantitySample else {
+                print("⚠️ No samples found for \(identifier.rawValue)")
+                completion(nil)
+                return
+            }
+            
+            let unit: HKUnit
+            switch identifier {
+            case .height:
+                unit = HKUnit.meter()
+            case .bodyMass:
+                unit = HKUnit.gramUnit(with: .kilo)
+            default:
+                unit = HKUnit.count()
+            }
+            
+            let value = sample.quantity.doubleValue(for: unit)
+            print("✅ Found \(identifier.rawValue): \(value)")
+            completion(value)
+        }
+        
+        print("🚀 Executing query for \(identifier.rawValue)")
+        healthStore.execute(query)
+    }
+    
+    /// Save BMI value to HealthKit
+    private func saveBMIToHealthKit(bmi: Double, completion: @escaping (Bool) -> Void) {
+        guard let bmiType = HKObjectType.quantityType(forIdentifier: .bodyMassIndex) else {
+            completion(false)
+            return
+        }
+        
+        let bmiQuantity = HKQuantity(unit: HKUnit.count(), doubleValue: bmi)
+        let bmiSample = HKQuantitySample(
+            type: bmiType,
+            quantity: bmiQuantity,
+            start: Date(),
+            end: Date()
+        )
+        
+        healthStore.save(bmiSample) { success, error in
+            if let error = error {
+                fileLogger.error("Error saving BMI to HealthKit: \(error.localizedDescription)", category: "HealthKit")
+                completion(false)
+            } else {
+                completion(success)
+            }
+        }
+    }
+    
+    /// Save height to HealthKit
+    func saveHeight(heightInMeters: Double, completion: @escaping (Bool) -> Void) {
+        guard let heightType = HKObjectType.quantityType(forIdentifier: .height) else {
+            fileLogger.error("Unable to create height quantity type", category: "HealthKit")
+            completion(false)
+            return
+        }
+        
+        let heightQuantity = HKQuantity(unit: HKUnit.meter(), doubleValue: heightInMeters)
+        let heightSample = HKQuantitySample(
+            type: heightType,
+            quantity: heightQuantity,
+            start: Date(),
+            end: Date()
+        )
+        
+        healthStore.save(heightSample) { success, error in
+            if let error = error {
+                fileLogger.error("Error saving height to HealthKit: \(error.localizedDescription)", category: "HealthKit")
+                completion(false)
+            } else {
+                fileLogger.info("✅ Successfully saved height to HealthKit: \(heightInMeters)m", category: "HealthKit")
+                completion(success)
+            }
+        }
+    }
+    
+    /// Save weight to HealthKit
+    func saveWeight(weightInKg: Double, completion: @escaping (Bool) -> Void) {
+        guard let weightType = HKObjectType.quantityType(forIdentifier: .bodyMass) else {
+            fileLogger.error("Unable to create weight quantity type", category: "HealthKit")
+            completion(false)
+            return
+        }
+        
+        let weightQuantity = HKQuantity(unit: HKUnit.gramUnit(with: .kilo), doubleValue: weightInKg)
+        let weightSample = HKQuantitySample(
+            type: weightType,
+            quantity: weightQuantity,
+            start: Date(),
+            end: Date()
+        )
+        
+        healthStore.save(weightSample) { success, error in
+            if let error = error {
+                fileLogger.error("Error saving weight to HealthKit: \(error.localizedDescription)", category: "HealthKit")
+                completion(false)
+            } else {
+                fileLogger.info("✅ Successfully saved weight to HealthKit: \(weightInKg)kg", category: "HealthKit")
+                completion(success)
+            }
+        }
+    }
+    
+    /// Save height and weight, then calculate and save BMI
+    func saveHeightWeightAndCalculateBMI(heightInMeters: Double, weightInKg: Double, completion: @escaping (Double?) -> Void) {
+        let dispatchGroup = DispatchGroup()
+        var heightSaved = false
+        var weightSaved = false
+        
+        // Save height
+        dispatchGroup.enter()
+        saveHeight(heightInMeters: heightInMeters) { success in
+            heightSaved = success
+            dispatchGroup.leave()
+        }
+        
+        // Save weight
+        dispatchGroup.enter()
+        saveWeight(weightInKg: weightInKg) { success in
+            weightSaved = success
+            dispatchGroup.leave()
+        }
+        
+        dispatchGroup.notify(queue: .main) { [weak self] in
+            guard heightSaved && weightSaved else {
+                fileLogger.error("Failed to save height or weight to HealthKit", category: "HealthKit")
+                completion(nil)
+                return
+            }
+            
+            // Calculate BMI
+            let bmi = weightInKg / (heightInMeters * heightInMeters)
+            fileLogger.info("📊 Calculated BMI from user input: \(bmi)", category: "HealthKit")
+            
+            // Save BMI to HealthKit
+            self?.saveBMIToHealthKit(bmi: bmi) { success in
+                if success {
+                    fileLogger.info("✅ Successfully saved calculated BMI to HealthKit: \(bmi)", category: "HealthKit")
+                    completion(bmi)
+                } else {
+                    fileLogger.error("❌ Failed to save BMI to HealthKit, but returning calculated value: \(bmi)", category: "HealthKit")
+                    completion(bmi)
+                }
+            }
         }
     }
 }

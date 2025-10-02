@@ -46,8 +46,8 @@ class COPDViewModel: ObservableObject {
             "cardiovascular_disease": 0.0,
             "smoking_status": 0.0,
             "alcohol_use": 0.0,
-            "bmi": 25.0,
-            "age_at_time_0": 0.0
+            "bmi": NSNull(), // No default - must be provided by user or HealthKit
+            "age_at_time_0": NSNull() // No default - must be provided by user or HealthKit
         ]
         
         print("🔍 COPD Data Extraction Starting...")
@@ -568,8 +568,8 @@ class COPDViewModel: ObservableObject {
         switch field {
         case "ethnicity", "sex_at_birth":
             return "Unknown"
-        case "bmi":
-            return 25.0
+        case "bmi", "age_at_time_0":
+            return NSNull() // No defaults for these critical fields
         default:
             return 0.0
         }
@@ -577,7 +577,9 @@ class COPDViewModel: ObservableObject {
     
     /// Format a value for JSON output
     private func formatValueForJSON(_ value: Any) -> String {
-        if let string = value as? String {
+        if value is NSNull {
+            return "null"
+        } else if let string = value as? String {
             return "\"\(string)\""
         } else if let number = value as? Double {
             // Format as integer if it's a whole number, otherwise as decimal
