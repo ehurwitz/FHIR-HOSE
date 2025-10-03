@@ -1,0 +1,17 @@
+# Xcode
+xcuserdata/
+build/
+DerivedData/
+*.xcworkspace
+
+# macOS
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Secrets
+*secrets*
+*apikey*
+*.env
