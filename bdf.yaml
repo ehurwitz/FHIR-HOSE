@@ -12,6 +12,8 @@ llm:
   usesLlm: true
   modelsSupported:
     - openai
+    - anthropic
+    - ollama
   modelsRequired:
     - openai
   bringOwnKey: true
