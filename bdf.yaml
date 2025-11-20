@@ -1,0 +1,70 @@
+version: 0.0.0
+
+tool:
+  name: Twinsight
+  repo_url: https://github.com/mikCN/CHARMTwinsights
+  tool_homepage: https://github.com/mikCN/CHARMTwinsights
+  documentation_url: https://github.com/mikCN/CHARMTwinsights
+  tool_type: WebAPI
+
+llm:
+  usesLlm: false
+  bringOwnKey: false
+
+input:
+  - name: clinical/phenotype structued 1
+    dataCategory: clinical-phenotype
+    dataClass: structured
+    dataType: clinical-ehr
+    format:
+      - json
+    dataStandard:
+      - FHIR
+    proprietary: false
+    source: https://github.com/mikCN/CHARMTwinsights/tree/main/synthea_output
+
+output:
+  - name: clinica/phenotype structured 1
+    dataCategory: clinical-phenotype
+    dataClass: structured
+    dataType: clinical-ehr
+    format:
+      - json
+    dataStandard:
+      - FHIR
+    proprietary: false
+    source: https://github.com/mikCN/CHARMTwinsights/tree/main/synthea_output
+
+license:
+  license_type: MIT
+  link: https://github.com/mikCN/CHARMTwinsights/blob/main/LICENSE
+
+funding:
+  source: ARPA-H
+  agreement: Not specified
+  link: https://arpa-h.gov/
+
+domains:
+  - Healthcare data analytics
+
+credit:
+  - name: UAB Team
+    role: Developer
+    org: University of Alabama at Birmingham
+    url: https://www.uab.edu/medicine/pmi/
+
+target_users:
+  primary_user:
+    user_type: researcher
+    technical_literacy_level:
+      - intermediate
+    biomedical_literacy_level:
+      - intermediate
+
+maturity:
+  beginning_maturity: 1
+  current_maturity: 2
+
+media: []
+
+collaborations: []
