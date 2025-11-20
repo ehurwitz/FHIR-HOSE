@@ -1,30 +1,34 @@
-version: 0.0.0
+version: 1.0.0
 
 tool:
-  name: Twinsight
-  repo_url: https://github.com/mikCN/CHARMTwinsights
-  tool_homepage: https://github.com/mikCN/CHARMTwinsights
-  documentation_url: https://github.com/mikCN/CHARMTwinsights
-  tool_type: WebAPI
+  name: FHIR-HOSE
+  repo_url: https://github.com/ehurwitz/FHIR-HOSE
+  tool_homepage: https://github.com/ehurwitz/FHIR-HOSE
+  documentation_url: https://github.com/ehurwitz/FHIR-HOSE
+  tool_type: WebApp
+  tool_notes: Mobile app
 
 llm:
-  usesLlm: false
-  bringOwnKey: false
+  usesLlm: true
+  modelsSupported:
+    - openai
+  modelsRequired:
+    - openai
+  bringOwnKey: true
 
 input:
-  - name: clinical/phenotype structued 1
+  - name: clinical/phenotype structured 1
     dataCategory: clinical-phenotype
     dataClass: structured
     dataType: clinical-ehr
     format:
-      - json
+      - pdf
     dataStandard:
       - FHIR
     proprietary: false
-    source: https://github.com/mikCN/CHARMTwinsights/tree/main/synthea_output
 
 output:
-  - name: clinica/phenotype structured 1
+  - name: clinical/phenotype structured 1
     dataCategory: clinical-phenotype
     dataClass: structured
     dataType: clinical-ehr
@@ -33,11 +37,10 @@ output:
     dataStandard:
       - FHIR
     proprietary: false
-    source: https://github.com/mikCN/CHARMTwinsights/tree/main/synthea_output
 
 license:
   license_type: MIT
-  link: https://github.com/mikCN/CHARMTwinsights/blob/main/LICENSE
+  link: https://github.com/CHARM-BDF/CHARM-README/blob/main/license.txt
 
 funding:
   source: ARPA-H
@@ -45,7 +48,7 @@ funding:
   link: https://arpa-h.gov/
 
 domains:
-  - Healthcare data analytics
+  - healthcare/clinical
 
 credit:
   - name: UAB Team
@@ -55,15 +58,15 @@ credit:
 
 target_users:
   primary_user:
-    user_type: researcher
+    user_type: patient
     technical_literacy_level:
-      - intermediate
+      - novice
     biomedical_literacy_level:
-      - intermediate
+      - novice
 
 maturity:
   beginning_maturity: 1
-  current_maturity: 2
+  current_maturity: 3
 
 media: []
 
