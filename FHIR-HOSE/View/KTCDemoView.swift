@@ -13,6 +13,8 @@ struct KTCDemoView: View {
     @StateObject private var vm = KTCDemo()
     @State private var showScanner = false
     @State private var showPhotoPicker = false
+    @State private var showImageExpanded = false
+    @State private var showLabelBoxes = true
     private let logger = Logger(subsystem: "com.fhirhose.app", category: "KTCDemoView")
 
     var body: some View {
@@ -52,6 +54,15 @@ struct KTCDemoView: View {
                     vm.cancelScan()
                 }
             )
+        }
+        .sheet(isPresented: $showImageExpanded) {
+            if let firstPage = vm.pages.first {
+                KTCExpandedImageView(
+                    image: firstPage,
+                    fields: vm.fields,
+                    showLabelBoxes: $showLabelBoxes
+                )
+            }
         }
     }
 
@@ -158,24 +169,46 @@ struct KTCDemoView: View {
         .padding()
     }
 
-    // MARK: - Editing (field list)
+    // MARK: - Editing (full interactive UI)
 
     private var editingView: some View {
         ScrollView {
             VStack(spacing: 16) {
-                // Scanned image thumbnail
+                // Tappable image with overlay
                 if let firstPage = vm.pages.first {
-                    Image(uiImage: firstPage)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxHeight: 200)
-                        .cornerRadius(8)
-                        .shadow(radius: 2)
+                    KTCOverlayView(
+                        image: firstPage,
+                        fields: vm.fields,
+                        showLabelBoxes: showLabelBoxes
+                    )
+                    .frame(height: 220)
+                    .cornerRadius(8)
+                    .shadow(radius: 2)
+                    .onTapGesture {
+                        showImageExpanded = true
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.caption)
+                            .padding(6)
+                            .background(.ultraThinMaterial)
+                            .cornerRadius(6)
+                            .padding(8)
+                    }
                 }
 
-                // Stats
-                let matched = vm.fields.filter { $0.mappedKeypath != nil }.count
+                // Controls row
                 HStack {
+                    Toggle("Boxes", isOn: $showLabelBoxes)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                    Text("Label boxes")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Spacer()
+
+                    let matched = vm.fields.filter { $0.mappedKeypath != nil }.count
                     Label("\(vm.recognizedLines.count) lines", systemImage: "text.alignleft")
                     Spacer()
                     Label("\(vm.fields.count) fields", systemImage: "tag")
@@ -188,6 +221,7 @@ struct KTCDemoView: View {
 
                 Divider()
 
+                // Field list
                 if vm.fields.isEmpty {
                     VStack(spacing: 12) {
                         Image(systemName: "doc.text.magnifyingglass")
@@ -202,26 +236,54 @@ struct KTCDemoView: View {
                     }
                     .padding(.vertical, 30)
                 } else {
-                    ForEach(vm.fields) { field in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(field.label)
-                                    .font(.headline)
-                                if let keypath = field.mappedKeypath {
-                                    Text(keypath)
-                                        .font(.caption)
-                                        .foregroundColor(.indigo)
-                                } else {
-                                    Text("No match")
-                                        .font(.caption)
-                                        .foregroundColor(.orange)
+                    ForEach($vm.fields) { $field in
+                        VStack(alignment: .leading, spacing: 8) {
+                            // Label (from OCR)
+                            Text(field.label)
+                                .font(.headline)
+
+                            // Keypath picker
+                            HStack {
+                                Text("Map to:")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Picker("Keypath", selection: Binding<String>(
+                                    get: { field.mappedKeypath ?? "__none__" },
+                                    set: { newVal in
+                                        let kp = newVal == "__none__" ? nil : newVal
+                                        vm.updateFieldKeypath(id: field.id, newKeypath: kp)
+                                    }
+                                )) {
+                                    Text("None").tag("__none__")
+                                    ForEach(vm.sortedKeypaths, id: \.self) { kp in
+                                        Text(kp).tag(kp)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .tint(.indigo)
+                            }
+
+                            // Value text field
+                            HStack {
+                                TextField("Value", text: $field.value)
+                                    .textFieldStyle(.roundedBorder)
+
+                                if field.mappedKeypath != nil {
+                                    Button {
+                                        vm.resetField(id: field.id)
+                                    } label: {
+                                        Image(systemName: "arrow.counterclockwise")
+                                            .font(.caption)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .tint(.indigo)
+                                    .help("Reset from JSON")
                                 }
                             }
-                            Spacer()
-                            Text(field.value.isEmpty ? "—" : field.value)
-                                .foregroundColor(field.value.isEmpty ? .secondary : .primary)
                         }
-                        .padding(.vertical, 6)
+                        .padding(12)
+                        .background(Color(.systemGray6))
+                        .cornerRadius(10)
                     }
                 }
 

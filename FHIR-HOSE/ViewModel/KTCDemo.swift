@@ -48,6 +48,30 @@ final class KTCDemo: ObservableObject {
     @Published var fields: [KTCField] = []
     @Published var patientData: [String: String] = [:]  // flattened keypath → value
 
+    /// Sorted keypath list for Picker UI.
+    var sortedKeypaths: [String] {
+        patientData.keys.sorted()
+    }
+
+    // MARK: - Field editing
+
+    func updateFieldKeypath(id: UUID, newKeypath: String?) {
+        guard let idx = fields.firstIndex(where: { $0.id == id }) else { return }
+        fields[idx].mappedKeypath = newKeypath
+        if let kp = newKeypath, let val = patientData[kp] {
+            fields[idx].value = val
+        } else {
+            fields[idx].value = ""
+        }
+    }
+
+    func resetField(id: UUID) {
+        guard let idx = fields.firstIndex(where: { $0.id == id }) else { return }
+        if let kp = fields[idx].mappedKeypath, let val = patientData[kp] {
+            fields[idx].value = val
+        }
+    }
+
     // MARK: - Scan / Pick handlers
 
     func handleScannedPages(_ images: [UIImage]) {
@@ -284,7 +308,7 @@ enum KTCPatientDataLoader {
     /// Multiple synonyms can point to the same keypath.
     private static let synonyms: [(patterns: [String], keypath: String)] = [
         // Name
-        (["full name", "patient name", "name of patient", "patient's name"], "patient.fullName"),
+        (["full name", "patient name", "participant name", "name of patient", "patient's name"], "patient.fullName"),
         (["first name", "first", "given name"], "patient.firstName"),
         (["last name", "last", "surname", "family name"], "patient.lastName"),
         // DOB
@@ -323,10 +347,10 @@ enum KTCPatientDataLoader {
             }
         }
 
-        // 2. Substring synonym match (label contains a synonym pattern)
+        // 2. Whole-word substring match (label contains a synonym as complete words)
         for entry in synonyms {
             for pattern in entry.patterns {
-                if normalized.contains(pattern) && pattern.count >= 3 {
+                if pattern.count >= 3 && containsWholeWords(normalized, pattern: pattern) {
                     if let value = data[entry.keypath] {
                         return (entry.keypath, value)
                     }
@@ -405,6 +429,13 @@ enum KTCPatientDataLoader {
         text.lowercased()
             .components(separatedBy: .whitespaces)
             .filter { !$0.isEmpty && $0.count > 1 }
+    }
+
+    /// Check if `pattern` appears in `text` at word boundaries.
+    /// e.g. "city" is found in "my city name" but NOT in "ethnicity".
+    private static func containsWholeWords(_ text: String, pattern: String) -> Bool {
+        let padded = " \(text) "
+        return padded.contains(" \(pattern) ")
     }
 
     /// Convert camelCase to space-separated words. "postalCode" → "postal code"
