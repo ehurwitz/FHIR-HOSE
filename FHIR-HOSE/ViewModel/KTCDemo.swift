@@ -24,8 +24,8 @@ struct KTCField: Identifiable {
     let id = UUID()
     var label: String
     var labelBoundingBox: CGRect
-    var mappedKeypath: String?   // Milestone 4
-    var value: String = ""       // Milestone 4
+    var mappedKeypath: String?
+    var value: String = ""
 }
 
 // MARK: - ViewModel
@@ -46,6 +46,7 @@ final class KTCDemo: ObservableObject {
     @Published var pages: [UIImage] = []
     @Published var recognizedLines: [KTCRecognizedLine] = []
     @Published var fields: [KTCField] = []
+    @Published var patientData: [String: String] = [:]  // flattened keypath → value
 
     // MARK: - Scan / Pick handlers
 
@@ -73,7 +74,7 @@ final class KTCDemo: ObservableObject {
         phase = .landing
     }
 
-    // MARK: - OCR
+    // MARK: - OCR + Mapping Pipeline
 
     private func runOCR() {
         guard let image = pages.first, let cgImage = image.cgImage else {
@@ -85,13 +86,20 @@ final class KTCDemo: ObservableObject {
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             do {
+                // 1. OCR
                 let lines = try await Self.performOCR(on: cgImage, pageIndex: 0)
-                let detectedFields = Self.extractLabelCandidates(from: lines)
+                // 2. Extract label candidates
+                var detectedFields = Self.extractLabelCandidates(from: lines)
+                // 3. Load + flatten patient JSON
+                let data = KTCPatientDataLoader.loadAndFlatten()
+                // 4. Fuzzy-match labels → keypaths and fill values
+                KTCPatientDataLoader.applyMappings(to: &detectedFields, using: data)
 
                 await MainActor.run {
                     self.recognizedLines = lines
                     self.fields = detectedFields
-                    self.logger.info("OCR complete: \(lines.count) lines, \(detectedFields.count) field candidates")
+                    self.patientData = data
+                    self.logger.info("OCR complete: \(lines.count) lines, \(detectedFields.count) fields, \(data.count) patient keypaths")
                     self.phase = .editing
                 }
             } catch {
@@ -170,10 +178,7 @@ final class KTCDemo: ObservableObject {
         var seenLabels: Set<String> = []
 
         for line in lines {
-            // Skip low-confidence lines
             guard line.confidence > 0.3 else { continue }
-
-            // Skip very long lines (likely paragraph text, not a label)
             guard line.text.count <= 80 else { continue }
 
             let trimmed = line.text.trimmingCharacters(in: .whitespaces)
@@ -199,7 +204,6 @@ final class KTCDemo: ObservableObject {
             // Strategy 2: Line matches a known keyword
             let lower = trimmed.lowercased()
             let matched = labelKeywords.contains { keyword in
-                // Check if the line starts with or equals the keyword
                 lower == keyword
                     || lower.hasPrefix(keyword + " ")
                     || lower.hasPrefix(keyword + "/")
@@ -219,5 +223,199 @@ final class KTCDemo: ObservableObject {
         }
 
         return fields
+    }
+}
+
+// MARK: - Patient Data Loader & Fuzzy Matcher
+
+/// Handles loading the demo JSON, flattening it, and fuzzy-matching labels to keypaths.
+enum KTCPatientDataLoader {
+    private static let logger = Logger(subsystem: "com.fhirhose.app", category: "KTC-Mapper")
+
+    // MARK: - Load & Flatten
+
+    /// Load ktc-demo-patient.json from the bundle and flatten to [keypath: value].
+    static func loadAndFlatten() -> [String: String] {
+        guard let url = Bundle.main.url(forResource: "ktc-demo-patient", withExtension: "json") else {
+            logger.error("ktc-demo-patient.json not found in bundle")
+            return [:]
+        }
+        do {
+            let data = try Data(contentsOf: url)
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                logger.error("JSON root is not a dictionary")
+                return [:]
+            }
+            var flat: [String: String] = [:]
+            flatten(json, prefix: "", into: &flat)
+
+            // Computed: fullName
+            if let first = flat["patient.firstName"], let last = flat["patient.lastName"] {
+                flat["patient.fullName"] = "\(first) \(last)"
+            }
+
+            logger.info("Loaded \(flat.count) patient keypaths")
+            return flat
+        } catch {
+            logger.error("Failed to load patient JSON: \(error.localizedDescription)")
+            return [:]
+        }
+    }
+
+    /// Recursively flatten a JSON dictionary into dot-separated keypaths.
+    private static func flatten(_ obj: Any, prefix: String, into result: inout [String: String]) {
+        if let dict = obj as? [String: Any] {
+            for (key, value) in dict {
+                let path = prefix.isEmpty ? key : "\(prefix).\(key)"
+                flatten(value, prefix: path, into: &result)
+            }
+        } else if let array = obj as? [Any] {
+            for (i, value) in array.enumerated() {
+                flatten(value, prefix: "\(prefix)[\(i)]", into: &result)
+            }
+        } else {
+            result[prefix] = "\(obj)"
+        }
+    }
+
+    // MARK: - Synonym Map
+
+    /// Maps normalized label text → canonical keypath tail.
+    /// Multiple synonyms can point to the same keypath.
+    private static let synonyms: [(patterns: [String], keypath: String)] = [
+        // Name
+        (["full name", "patient name", "name of patient", "patient's name"], "patient.fullName"),
+        (["first name", "first", "given name"], "patient.firstName"),
+        (["last name", "last", "surname", "family name"], "patient.lastName"),
+        // DOB
+        (["dob", "date of birth", "birth date", "birthday", "birthdate", "d.o.b", "d.o.b."], "patient.dateOfBirth"),
+        // Sex
+        (["sex", "gender", "sex/gender", "sex / gender"], "patient.sex"),
+        // Contact
+        (["phone", "telephone", "cell", "mobile", "phone number", "tel", "cell phone", "home phone", "daytime phone"], "patient.phone"),
+        (["email", "e-mail", "email address", "e-mail address"], "patient.email"),
+        // Address
+        (["address", "street", "street address", "address line 1", "address 1", "line 1", "mailing address", "home address"], "patient.address.line1"),
+        (["address line 2", "address 2", "line 2", "apt", "suite", "unit", "apt/suite"], "patient.address.line2"),
+        (["city", "city/town"], "patient.address.city"),
+        (["state", "state/province"], "patient.address.state"),
+        (["zip", "zip code", "zipcode", "postal code", "postal", "zip/postal"], "patient.address.postalCode"),
+        // Insurance
+        (["member id", "member #", "member no", "member number", "subscriber id", "subscriber", "id #", "id number", "identification number"], "patient.insurance.memberId"),
+        (["group", "group id", "group #", "group no", "group number", "grp", "grp #"], "patient.insurance.groupId"),
+        (["payer", "insurance", "insurance company", "plan", "carrier", "health plan", "insurance plan", "insurance name"], "patient.insurance.payer"),
+    ]
+
+    // MARK: - Fuzzy Match
+
+    /// Try to match a label string to a keypath. Returns (keypath, value) or nil.
+    static func fuzzyMatch(label: String, in data: [String: String]) -> (keypath: String, value: String)? {
+        let normalized = normalize(label)
+
+        // 1. Exact synonym match
+        for entry in synonyms {
+            for pattern in entry.patterns {
+                if normalized == pattern {
+                    if let value = data[entry.keypath] {
+                        return (entry.keypath, value)
+                    }
+                }
+            }
+        }
+
+        // 2. Substring synonym match (label contains a synonym pattern)
+        for entry in synonyms {
+            for pattern in entry.patterns {
+                if normalized.contains(pattern) && pattern.count >= 3 {
+                    if let value = data[entry.keypath] {
+                        return (entry.keypath, value)
+                    }
+                }
+            }
+        }
+
+        // 3. Token overlap with keypath tails
+        let labelTokens = tokenize(normalized)
+        guard !labelTokens.isEmpty else { return nil }
+
+        var bestScore: Double = 0
+        var bestKeypath: String?
+
+        for keypath in data.keys {
+            // Extract the tail of the keypath (e.g., "patient.address.city" → "city")
+            let tail = keypath.components(separatedBy: ".").last ?? keypath
+            let keypathTokens = tokenize(camelCaseToWords(tail))
+
+            guard !keypathTokens.isEmpty else { continue }
+
+            // Jaccard-like overlap score
+            let labelSet = Set(labelTokens)
+            let keypathSet = Set(keypathTokens)
+            let intersection = labelSet.intersection(keypathSet).count
+            let union = labelSet.union(keypathSet).count
+            let score = Double(intersection) / Double(union)
+
+            if score > bestScore {
+                bestScore = score
+                bestKeypath = keypath
+            }
+        }
+
+        // Require a minimum threshold
+        if bestScore >= 0.5, let keypath = bestKeypath, let value = data[keypath] {
+            return (keypath, value)
+        }
+
+        return nil
+    }
+
+    /// Apply fuzzy matching to all fields.
+    static func applyMappings(to fields: inout [KTCField], using data: [String: String]) {
+        for i in fields.indices {
+            let label = fields[i].label
+            if let match = fuzzyMatch(label: label, in: data) {
+                fields[i].mappedKeypath = match.keypath
+                fields[i].value = match.value
+                logger.info("Mapped '\(label)' → \(match.keypath) = \(match.value)")
+            } else {
+                logger.info("No match for '\(label)'")
+            }
+        }
+    }
+
+    // MARK: - Text Helpers
+
+    /// Normalize a label: lowercase, strip punctuation, collapse whitespace.
+    private static func normalize(_ text: String) -> String {
+        let lower = text.lowercased()
+        let cleaned = lower.unicodeScalars.map { char -> Character in
+            if CharacterSet.alphanumerics.contains(char) || char == " " {
+                return Character(char)
+            }
+            return " "
+        }
+        return String(cleaned)
+            .components(separatedBy: .whitespaces)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    /// Tokenize a string into lowercase words.
+    private static func tokenize(_ text: String) -> [String] {
+        text.lowercased()
+            .components(separatedBy: .whitespaces)
+            .filter { !$0.isEmpty && $0.count > 1 }
+    }
+
+    /// Convert camelCase to space-separated words. "postalCode" → "postal code"
+    private static func camelCaseToWords(_ text: String) -> String {
+        var result = ""
+        for char in text {
+            if char.isUppercase && !result.isEmpty {
+                result += " "
+            }
+            result += String(char).lowercased()
+        }
+        return result
     }
 }

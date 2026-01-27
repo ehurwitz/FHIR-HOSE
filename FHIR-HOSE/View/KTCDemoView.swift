@@ -174,10 +174,14 @@ struct KTCDemoView: View {
                 }
 
                 // Stats
+                let matched = vm.fields.filter { $0.mappedKeypath != nil }.count
                 HStack {
-                    Label("\(vm.recognizedLines.count) OCR lines", systemImage: "text.alignleft")
+                    Label("\(vm.recognizedLines.count) lines", systemImage: "text.alignleft")
                     Spacer()
-                    Label("\(vm.fields.count) fields detected", systemImage: "tag")
+                    Label("\(vm.fields.count) fields", systemImage: "tag")
+                    Spacer()
+                    Label("\(matched) matched", systemImage: "checkmark.circle")
+                        .foregroundColor(matched > 0 ? .green : .secondary)
                 }
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -208,9 +212,9 @@ struct KTCDemoView: View {
                                         .font(.caption)
                                         .foregroundColor(.indigo)
                                 } else {
-                                    Text("No mapping yet")
+                                    Text("No match")
                                         .font(.caption)
-                                        .foregroundColor(.secondary)
+                                        .foregroundColor(.orange)
                                 }
                             }
                             Spacer()
