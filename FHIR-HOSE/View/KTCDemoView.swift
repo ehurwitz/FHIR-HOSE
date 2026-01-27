@@ -15,6 +15,9 @@ struct KTCDemoView: View {
     @State private var showPhotoPicker = false
     @State private var showImageExpanded = false
     @State private var showLabelBoxes = true
+    @State private var showCopiedToast = false
+    @State private var showShareSheet = false
+    @State private var exportPDFURL: URL?
     private let logger = Logger(subsystem: "com.fhirhose.app", category: "KTCDemoView")
 
     var body: some View {
@@ -62,6 +65,11 @@ struct KTCDemoView: View {
                     fields: vm.fields,
                     showLabelBoxes: $showLabelBoxes
                 )
+            }
+        }
+        .sheet(isPresented: $showShareSheet) {
+            if let url = exportPDFURL {
+                KTCShareSheet(items: [url])
             }
         }
     }
@@ -289,6 +297,38 @@ struct KTCDemoView: View {
 
                 Divider()
 
+                // Export actions
+                VStack(spacing: 12) {
+                    Button {
+                        vm.copyToClipboard()
+                        showCopiedToast = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            showCopiedToast = false
+                        }
+                    } label: {
+                        Label("Copy Filled Data", systemImage: "doc.on.clipboard")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.indigo)
+                    .controlSize(.large)
+
+                    Button {
+                        if let url = vm.generateFilledPDF() {
+                            exportPDFURL = url
+                            showShareSheet = true
+                        }
+                    } label: {
+                        Label("Export Filled PDF", systemImage: "square.and.arrow.up")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.indigo)
+                    .controlSize(.large)
+                }
+
+                Divider()
+
                 Button("Start Over") {
                     vm.phase = .landing
                     vm.pages = []
@@ -296,9 +336,28 @@ struct KTCDemoView: View {
                     vm.fields = []
                 }
                 .buttonStyle(.bordered)
-                .tint(.indigo)
+                .tint(.red)
             }
             .padding()
+        }
+        .overlay {
+            if showCopiedToast {
+                VStack {
+                    Spacer()
+                    Text("Copied to clipboard!")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.indigo)
+                        .cornerRadius(20)
+                        .shadow(radius: 4)
+                        .padding(.bottom, 30)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .animation(.easeInOut, value: showCopiedToast)
+            }
         }
     }
 
