@@ -6,11 +6,5 @@
 	<array>
 		<dict/>
 	</array>
-	<key>NSHealthClinicalHealthRecordsShareUsageDescription</key>
-	<string>This app needs access to clinical health records to process and analyze your medical documents.</string>
-	<key>NSHealthShareUsageDescription</key>
-	<string>This app needs access to your health data to provide comprehensive health record management and analysis. This includes vital signs, body measurements, activity data, and other health metrics to create a complete health profile.</string>
-	<key>NSHealthUpdateUsageDescription</key>
-	<string>This app needs permission to save calculated health metrics like BMI to your Health app to keep your health data synchronized and up-to-date.</string>
 </dict>
 </plist>
