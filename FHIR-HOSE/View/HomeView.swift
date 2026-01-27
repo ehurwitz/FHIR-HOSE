@@ -76,6 +76,16 @@ struct HomeView: View {
                     )
                 }
                 .buttonStyle(PlainButtonStyle())
+
+                NavigationLink(destination: KTCDemoView()) {
+                    HealthAppCard(
+                        title: "KTC Demo",
+                        subtitle: "Scan a form → auto-fill",
+                        systemImage: "doc.text.viewfinder",
+                        color: .indigo
+                    )
+                }
+                .buttonStyle(PlainButtonStyle())
             }
             .padding()
         }
