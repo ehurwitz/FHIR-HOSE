@@ -256,7 +256,7 @@ struct KTCDemoView: View {
                                 )) {
                                     Text("None").tag("__none__")
                                     ForEach(vm.sortedKeypaths, id: \.self) { kp in
-                                        Text(kp).tag(kp)
+                                        Text(vm.displayName(for: kp)).tag(kp)
                                     }
                                 }
                                 .pickerStyle(.menu)

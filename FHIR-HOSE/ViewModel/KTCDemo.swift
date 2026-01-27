@@ -53,6 +53,42 @@ final class KTCDemo: ObservableObject {
         patientData.keys.sorted()
     }
 
+    /// Human-readable display name for a keypath, e.g. "patient.address.city" → "Address > City".
+    func displayName(for keypath: String) -> String {
+        let parts = keypath.components(separatedBy: ".")
+        // Drop "patient" prefix if present
+        let meaningful = parts.first == "patient" ? Array(parts.dropFirst()) : parts
+        return meaningful.map { Self.camelCaseToTitleCase($0) }.joined(separator: " > ")
+    }
+
+    /// Convert camelCase to Title Case words, also splitting before digits.
+    /// "postalCode" → "Postal Code", "line1" → "Line 1", "memberId" → "Member ID"
+    private static func camelCaseToTitleCase(_ text: String) -> String {
+        var words: [String] = []
+        var current = ""
+        var prevWasDigit = false
+        for char in text {
+            let isDigit = char.isNumber
+            if (char.isUppercase || (isDigit && !prevWasDigit)) && !current.isEmpty {
+                words.append(current)
+                current = String(char).lowercased()
+            } else {
+                current += String(char)
+            }
+            prevWasDigit = isDigit
+        }
+        if !current.isEmpty { words.append(current) }
+        // Title-case each word, with special handling for "id" → "ID"
+        return words.map { word in
+            let lower = word.lowercased()
+            if lower == "id" { return "ID" }
+            if lower == "dob" { return "DOB" }
+            if lower == "ssn" { return "SSN" }
+            if lower == "mrn" { return "MRN" }
+            return word.prefix(1).uppercased() + word.dropFirst()
+        }.joined(separator: " ")
+    }
+
     // MARK: - Field editing
 
     func updateFieldKeypath(id: UUID, newKeypath: String?) {
@@ -175,24 +211,48 @@ final class KTCDemo: ObservableObject {
 
     /// Common label keywords found on medical forms.
     private static let labelKeywords: Set<String> = [
-        "name", "first", "last", "middle", "patient",
-        "dob", "date of birth", "birth date", "birthday",
+        // Identity
+        "name", "first", "last", "middle", "patient", "participant",
+        "full name", "first name", "last name", "middle name",
+        "patient name", "participant name",
+        // DOB / Age
+        "dob", "date of birth", "birth date", "birthday", "age",
+        // Sex / Gender
         "sex", "gender",
+        // Contact
         "phone", "telephone", "cell", "mobile", "fax",
         "email", "e-mail",
+        // Address
         "address", "street", "line", "apt", "suite",
         "city", "state", "zip", "postal", "zip code", "postal code",
-        "ssn", "social security",
+        "county", "country",
+        // ID numbers
+        "ssn", "social security", "mrn", "medical record",
+        "account", "account number", "id number",
+        // Insurance
         "insurance", "payer", "plan", "carrier",
         "member", "member id", "subscriber", "group", "group id", "policy",
-        "employer", "occupation",
-        "emergency", "contact",
+        "copay", "co-pay", "deductible", "coverage",
+        // Employment
+        "employer", "occupation", "company",
+        // Emergency
+        "emergency", "contact", "relationship",
+        // Clinical
         "allergies", "medications", "pharmacy",
+        "diagnosis", "condition", "problem",
+        "procedure", "treatment",
+        // Provider
         "physician", "doctor", "provider", "referring",
+        "facility", "department", "clinic",
+        // Administrative
         "signature", "date", "signed",
         "reason", "visit", "chief complaint",
-        "height", "weight",
+        "authorization", "consent",
+        // Vitals
+        "height", "weight", "blood pressure", "bp",
+        // Demographics
         "race", "ethnicity", "marital", "language",
+        "marital status", "preferred language", "religion",
         "guarantor", "responsible party",
     ]
 
@@ -225,13 +285,37 @@ final class KTCDemo: ObservableObject {
                 }
             }
 
-            // Strategy 2: Line matches a known keyword
+            // Strategy 2: Line contains underscores/dashes (fill-in-the-blank pattern)
+            // e.g. "Name ___________" or "DOB __/__/__"
+            if trimmed.contains("__") || trimmed.contains("--") {
+                let stripped = trimmed
+                    .replacingOccurrences(of: "_", with: " ")
+                    .replacingOccurrences(of: "-", with: " ")
+                    .trimmingCharacters(in: .whitespaces)
+                    .components(separatedBy: .whitespaces)
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " ")
+                if !stripped.isEmpty && stripped.count <= 50 {
+                    let normalized = stripped.lowercased()
+                    if !seenLabels.contains(normalized) {
+                        seenLabels.insert(normalized)
+                        fields.append(KTCField(
+                            label: stripped,
+                            labelBoundingBox: line.boundingBox
+                        ))
+                    }
+                    continue
+                }
+            }
+
+            // Strategy 3: Line matches a known keyword
             let lower = trimmed.lowercased()
             let matched = labelKeywords.contains { keyword in
                 lower == keyword
                     || lower.hasPrefix(keyword + " ")
                     || lower.hasPrefix(keyword + "/")
                     || lower.hasPrefix(keyword + "(")
+                    || lower.hasSuffix(" " + keyword)
             }
 
             if matched {
@@ -308,26 +392,45 @@ enum KTCPatientDataLoader {
     /// Multiple synonyms can point to the same keypath.
     private static let synonyms: [(patterns: [String], keypath: String)] = [
         // Name
-        (["full name", "patient name", "participant name", "name of patient", "patient's name"], "patient.fullName"),
-        (["first name", "first", "given name"], "patient.firstName"),
-        (["last name", "last", "surname", "family name"], "patient.lastName"),
-        // DOB
-        (["dob", "date of birth", "birth date", "birthday", "birthdate", "d.o.b", "d.o.b."], "patient.dateOfBirth"),
-        // Sex
-        (["sex", "gender", "sex/gender", "sex / gender"], "patient.sex"),
+        (["full name", "patient name", "participant name", "name of patient",
+          "patient s name", "patients name", "name last first",
+          "name last first middle", "print name", "printed name"], "patient.fullName"),
+        (["first name", "given name", "first", "forename"], "patient.firstName"),
+        (["last name", "surname", "family name", "last"], "patient.lastName"),
+        (["middle name", "middle initial", "middle", "mi"], "patient.middleName"),
+        // DOB / Age
+        (["dob", "date of birth", "birth date", "birthday", "birthdate",
+          "d o b", "d o b ", "born", "birth"], "patient.dateOfBirth"),
+        // Sex / Gender
+        (["sex", "gender", "sex gender", "sex or gender",
+          "male female", "male   female", "m f"], "patient.sex"),
         // Contact
-        (["phone", "telephone", "cell", "mobile", "phone number", "tel", "cell phone", "home phone", "daytime phone"], "patient.phone"),
-        (["email", "e-mail", "email address", "e-mail address"], "patient.email"),
+        (["phone", "telephone", "cell", "mobile", "phone number", "tel",
+          "cell phone", "home phone", "daytime phone", "phone no",
+          "contact number", "contact phone", "primary phone",
+          "telephone number"], "patient.phone"),
+        (["email", "e mail", "email address", "e mail address",
+          "electronic mail"], "patient.email"),
         // Address
-        (["address", "street", "street address", "address line 1", "address 1", "line 1", "mailing address", "home address"], "patient.address.line1"),
-        (["address line 2", "address 2", "line 2", "apt", "suite", "unit", "apt/suite"], "patient.address.line2"),
-        (["city", "city/town"], "patient.address.city"),
-        (["state", "state/province"], "patient.address.state"),
-        (["zip", "zip code", "zipcode", "postal code", "postal", "zip/postal"], "patient.address.postalCode"),
+        (["address", "street", "street address", "address line 1",
+          "address 1", "line 1", "mailing address", "home address",
+          "street address line 1", "residential address"], "patient.address.line1"),
+        (["address line 2", "address 2", "line 2", "apt", "suite",
+          "unit", "apt suite", "apartment"], "patient.address.line2"),
+        (["city", "city town"], "patient.address.city"),
+        (["state", "state province", "st"], "patient.address.state"),
+        (["zip", "zip code", "zipcode", "postal code", "postal",
+          "zip postal", "zip 4"], "patient.address.postalCode"),
         // Insurance
-        (["member id", "member #", "member no", "member number", "subscriber id", "subscriber", "id #", "id number", "identification number"], "patient.insurance.memberId"),
-        (["group", "group id", "group #", "group no", "group number", "grp", "grp #"], "patient.insurance.groupId"),
-        (["payer", "insurance", "insurance company", "plan", "carrier", "health plan", "insurance plan", "insurance name"], "patient.insurance.payer"),
+        (["member id", "member no", "member number", "subscriber id",
+          "subscriber", "id number", "identification number",
+          "subscriber number", "policy number", "policy no",
+          "insurance id", "insured id"], "patient.insurance.memberId"),
+        (["group", "group id", "group no", "group number",
+          "grp", "grp no", "group plan"], "patient.insurance.groupId"),
+        (["payer", "insurance", "insurance company", "plan", "carrier",
+          "health plan", "insurance plan", "insurance name",
+          "insurance carrier", "plan name", "insurer"], "patient.insurance.payer"),
     ]
 
     // MARK: - Fuzzy Match
