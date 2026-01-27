@@ -55,9 +55,23 @@ final class KTCDemo: ObservableObject {
 
     /// Human-readable display name for a keypath, e.g. "patient.address.city" → "Address > City".
     func displayName(for keypath: String) -> String {
+        // Special display names for computed fields
+        switch keypath {
+        case "_computed.todayDate": return "Today's Date"
+        case "_computed.patientAge": return "Patient Age"
+        case "_computed.dobFormatted": return "DOB (Formatted)"
+        case "patient.fullName": return "Full Name"
+        case "patient.fullAddress": return "Full Address"
+        default: break
+        }
         let parts = keypath.components(separatedBy: ".")
-        // Drop "patient" prefix if present
-        let meaningful = parts.first == "patient" ? Array(parts.dropFirst()) : parts
+        // Drop known prefixes
+        let meaningful: [String]
+        if parts.first == "patient" || parts.first == "_computed" {
+            meaningful = Array(parts.dropFirst())
+        } else {
+            meaningful = parts
+        }
         return meaningful.map { Self.camelCaseToTitleCase($0) }.joined(separator: " > ")
     }
 
@@ -473,7 +487,43 @@ enum KTCPatientDataLoader {
                 flat["patient.fullName"] = "\(first) \(last)"
             }
 
-            logger.info("Loaded \(flat.count) patient keypaths")
+            // Computed: fullAddress (single-line)
+            let addrParts = [
+                flat["patient.address.line1"],
+                flat["patient.address.line2"],
+                flat["patient.address.city"],
+                flat["patient.address.state"],
+                flat["patient.address.postalCode"]
+            ].compactMap { $0 }.filter { !$0.isEmpty }
+            if !addrParts.isEmpty {
+                flat["patient.fullAddress"] = addrParts.joined(separator: ", ")
+            }
+
+            // Computed: today's date (MM/DD/YYYY — US medical form standard)
+            let fmt = DateFormatter()
+            fmt.dateFormat = "MM/dd/yyyy"
+            flat["_computed.todayDate"] = fmt.string(from: Date())
+
+            // Computed: patient age from DOB
+            if let dobStr = flat["patient.dateOfBirth"] {
+                let isoFmt = DateFormatter()
+                isoFmt.dateFormat = "yyyy-MM-dd"
+                if let dob = isoFmt.date(from: dobStr) {
+                    let age = Calendar.current.dateComponents([.year], from: dob, to: Date()).year ?? 0
+                    flat["_computed.patientAge"] = "\(age)"
+                }
+            }
+
+            // Computed: DOB formatted as MM/DD/YYYY (common US form format)
+            if let dobStr = flat["patient.dateOfBirth"] {
+                let isoFmt = DateFormatter()
+                isoFmt.dateFormat = "yyyy-MM-dd"
+                if let dob = isoFmt.date(from: dobStr) {
+                    flat["_computed.dobFormatted"] = fmt.string(from: dob)
+                }
+            }
+
+            logger.info("Loaded \(flat.count) patient keypaths (incl. computed)")
             return flat
         } catch {
             logger.error("Failed to load patient JSON: \(error.localizedDescription)")
@@ -511,7 +561,8 @@ enum KTCPatientDataLoader {
         (["middle name", "middle initial", "middle", "mi"], "patient.middleName"),
         // DOB / Age
         (["dob", "date of birth", "birth date", "birthday", "birthdate",
-          "d o b", "d o b ", "born", "birth"], "patient.dateOfBirth"),
+          "d o b", "d o b ", "born", "birth"], "_computed.dobFormatted"),
+        (["age", "patient age"], "_computed.patientAge"),
         // Sex / Gender
         (["sex", "gender", "sex gender", "sex or gender",
           "male female", "male   female", "m f"], "patient.sex"),
@@ -542,6 +593,14 @@ enum KTCPatientDataLoader {
         (["payer", "insurance", "insurance company", "plan", "carrier",
           "health plan", "insurance plan", "insurance name",
           "insurance carrier", "plan name", "insurer"], "patient.insurance.payer"),
+        // Full address (single-line)
+        (["full address", "complete address", "mailing address full"], "patient.fullAddress"),
+        // Today's date
+        (["today s date", "todays date", "today date", "current date",
+          "date signed", "date of signature", "signature date",
+          "date today"], "_computed.todayDate"),
+        // Date (standalone — most forms mean "today's date")
+        (["date"], "_computed.todayDate"),
     ]
 
     // MARK: - Fuzzy Match
