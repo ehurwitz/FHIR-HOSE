@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import NaturalLanguage
 import OSLog
 import UIKit
 import Vision
@@ -20,12 +21,43 @@ struct KTCRecognizedLine: Identifiable {
     let pageIndex: Int
 }
 
+enum KTCFieldType: String {
+    case text = "text"
+    case checkbox = "checkbox"
+    case signature = "signature"
+    case date = "date"
+}
+
 struct KTCField: Identifiable {
     let id = UUID()
     var label: String
     var labelBoundingBox: CGRect
+    var fieldType: KTCFieldType = .text
     var mappedKeypath: String?
     var value: String = ""
+    var matchConfidence: Double = 0  // 0-1 confidence score for the match
+    var matchMethod: String?  // How the match was made (synonym, embedding, token)
+    var detectedValue: String?  // Value found on the form via spatial analysis
+    var valueBoundingBox: CGRect?  // Where the value was found
+    var isChecked: Bool?  // For checkbox fields
+}
+
+/// Represents a detected checkbox on the form.
+struct KTCCheckbox {
+    let boundingBox: CGRect
+    var isChecked: Bool
+    var associatedText: String?  // Text near the checkbox (e.g., "Male", "Female")
+    var groupId: UUID?  // If part of a checkbox group
+}
+
+/// Represents a group of mutually exclusive checkboxes (e.g., Male/Female, Yes/No).
+struct KTCCheckboxGroup: Identifiable {
+    let id = UUID()
+    let boundingBox: CGRect  // Combined bounding box of the group
+    var options: [KTCCheckbox]  // The checkboxes in this group
+    var groupLabel: String?  // e.g., "Sex", "Gender" - the label for the whole group
+    var mappedKeypath: String?  // Patient data keypath this group maps to
+    var selectedIndex: Int?  // Which option is selected (auto-filled)
 }
 
 // MARK: - ViewModel
@@ -46,6 +78,7 @@ final class KTCDemo: ObservableObject {
     @Published var pages: [UIImage] = []
     @Published var recognizedLines: [KTCRecognizedLine] = []
     @Published var fields: [KTCField] = []
+    @Published var checkboxGroups: [KTCCheckboxGroup] = []  // Detected checkbox groups
     @Published var patientData: [String: String] = [:]  // flattened keypath → value
 
     /// Sorted keypath list for Picker UI.
@@ -122,6 +155,30 @@ final class KTCDemo: ObservableObject {
         }
     }
 
+    // MARK: - Checkbox Group Editing
+
+    /// Toggle a checkbox within a group. For multi-option groups, only one can be selected.
+    func toggleCheckbox(groupIndex: Int, optionIndex: Int) {
+        guard groupIndex < checkboxGroups.count,
+              optionIndex < checkboxGroups[groupIndex].options.count else { return }
+
+        let isMultiOption = checkboxGroups[groupIndex].options.count > 1
+
+        if isMultiOption {
+            // Mutually exclusive: uncheck all others, check this one
+            for i in checkboxGroups[groupIndex].options.indices {
+                checkboxGroups[groupIndex].options[i].isChecked = (i == optionIndex)
+            }
+            checkboxGroups[groupIndex].selectedIndex = optionIndex
+        } else {
+            // Single checkbox: just toggle it
+            checkboxGroups[groupIndex].options[optionIndex].isChecked.toggle()
+            checkboxGroups[groupIndex].selectedIndex = checkboxGroups[groupIndex].options[optionIndex].isChecked ? 0 : nil
+        }
+
+        logger.info("Toggled checkbox group \(groupIndex) option \(optionIndex)")
+    }
+
     // MARK: - Export
 
     /// Build a readable text summary of all filled fields.
@@ -131,14 +188,30 @@ final class KTCDemo: ObservableObject {
         lines.append(String(repeating: "=", count: 38))
         lines.append("")
 
+        // Checkbox groups
+        let filledGroups = checkboxGroups.filter { $0.selectedIndex != nil && $0.options.count > 1 }
+        if !filledGroups.isEmpty {
+            lines.append("Checkbox Selections:")
+            for group in filledGroups {
+                let label = group.groupLabel ?? "Choice"
+                if let idx = group.selectedIndex, idx < group.options.count {
+                    let selected = group.options[idx].associatedText ?? "Option \(idx + 1)"
+                    lines.append("  \(label): \(selected)")
+                }
+            }
+            lines.append("")
+        }
+
+        // Text fields
         let matched = fields.filter { $0.mappedKeypath != nil && !$0.value.isEmpty }
         let unmatched = fields.filter { $0.mappedKeypath == nil }
 
-        if matched.isEmpty {
+        if matched.isEmpty && filledGroups.isEmpty {
             lines.append("No fields were matched to patient data.")
-        } else {
+        } else if !matched.isEmpty {
+            lines.append("Text Fields:")
             for field in matched {
-                lines.append("\(field.label): \(field.value)")
+                lines.append("  \(field.label): \(field.value)")
             }
         }
 
@@ -183,6 +256,28 @@ final class KTCDemo: ObservableObject {
 
         // Draw the scanned image as background
         image.draw(in: CGRect(origin: .zero, size: pageSize))
+
+        // Draw checkmarks for selected checkboxes
+        for group in checkboxGroups {
+            guard let selectedIdx = group.selectedIndex, selectedIdx < group.options.count else { continue }
+            let option = group.options[selectedIdx]
+            let box = option.boundingBox
+
+            // Convert Vision coords to PDF coords
+            let x = box.origin.x * pageSize.width
+            let y = (1.0 - box.origin.y - box.height) * pageSize.height
+            let h = box.height * pageSize.height
+
+            // Draw a checkmark
+            let checkSize = max(14, min(24, h * 0.8))
+            let checkFont = UIFont.systemFont(ofSize: checkSize, weight: .bold)
+            let checkAttrs: [NSAttributedString.Key: Any] = [
+                .font: checkFont,
+                .foregroundColor: UIColor(red: 0.0, green: 0.5, blue: 0.0, alpha: 1.0) // green
+            ]
+            let checkStr = "✓" as NSString
+            checkStr.draw(at: CGPoint(x: x - checkSize * 0.5, y: y), withAttributes: checkAttrs)
+        }
 
         // Draw filled values near their label bounding boxes
         let filledFields = fields.filter { !$0.value.isEmpty }
@@ -275,16 +370,29 @@ final class KTCDemo: ObservableObject {
                 let lines = try await Self.performOCR(on: cgImage, pageIndex: 0)
                 // 2. Extract label candidates
                 var detectedFields = Self.extractLabelCandidates(from: lines)
-                // 3. Load + flatten patient JSON
+                // 3. Detect checkboxes, group them, and classify field types
+                let checkboxes = Self.detectCheckboxes(from: lines)
+                var checkboxGroups = Self.groupCheckboxes(checkboxes, allLines: lines)
+                Self.classifyFieldTypes(&detectedFields, checkboxes: checkboxes, allLines: lines)
+                // 4. Spatial analysis: find values near labels
+                Self.associateValuesWithLabels(&detectedFields, allLines: lines)
+                // 5. Load + flatten patient JSON
                 let data = KTCPatientDataLoader.loadAndFlatten()
-                // 4. Fuzzy-match labels → keypaths and fill values
+                // 6. Fuzzy-match labels → keypaths and fill values
                 KTCPatientDataLoader.applyMappings(to: &detectedFields, using: data)
+                // 7. Auto-check checkboxes based on patient data
+                Self.autoCheckCheckboxGroups(&checkboxGroups, using: data)
 
                 await MainActor.run {
                     self.recognizedLines = lines
                     self.fields = detectedFields
+                    self.checkboxGroups = checkboxGroups
                     self.patientData = data
-                    self.logger.info("OCR complete: \(lines.count) lines, \(detectedFields.count) fields, \(data.count) patient keypaths")
+                    let withValues = detectedFields.filter { $0.detectedValue != nil }.count
+                    let checkboxFields = detectedFields.filter { $0.fieldType == .checkbox }.count
+                    let groupCount = checkboxGroups.count
+                    let autoChecked = checkboxGroups.filter { $0.selectedIndex != nil }.count
+                    self.logger.info("OCR complete: \(lines.count) lines, \(detectedFields.count) fields (\(withValues) detected, \(checkboxFields) checkboxes, \(groupCount) groups, \(autoChecked) auto-checked), \(data.count) keypaths")
                     self.phase = .editing
                 }
             } catch {
@@ -339,46 +447,54 @@ final class KTCDemo: ObservableObject {
         // Identity
         "name", "first", "last", "middle", "patient", "participant",
         "full name", "first name", "last name", "middle name",
-        "patient name", "participant name",
+        "patient name", "participant name", "legal name", "print name",
+        "insured", "applicant", "client", "individual",
         // DOB / Age
         "dob", "date of birth", "birth date", "birthday", "age",
+        "birthdate", "born",
         // Sex / Gender
-        "sex", "gender",
+        "sex", "gender", "male", "female",
         // Contact
         "phone", "telephone", "cell", "mobile", "fax",
-        "email", "e-mail",
+        "email", "e-mail", "contact",
         // Address
-        "address", "street", "line", "apt", "suite",
+        "address", "street", "line", "apt", "suite", "unit",
         "city", "state", "zip", "postal", "zip code", "postal code",
-        "county", "country",
+        "county", "country", "residence", "mailing",
         // ID numbers
         "ssn", "social security", "mrn", "medical record",
-        "account", "account number", "id number",
+        "account", "account number", "id number", "id", "number",
+        "identification", "license", "driver",
         // Insurance
-        "insurance", "payer", "plan", "carrier",
+        "insurance", "payer", "plan", "carrier", "insurer",
         "member", "member id", "subscriber", "group", "group id", "policy",
-        "copay", "co-pay", "deductible", "coverage",
+        "copay", "co-pay", "deductible", "coverage", "bin", "pcn",
+        "effective", "expiration", "rx",
         // Employment
-        "employer", "occupation", "company",
+        "employer", "occupation", "company", "work", "job",
         // Emergency
-        "emergency", "contact", "relationship",
+        "emergency", "relationship", "notify", "next of kin",
         // Clinical
-        "allergies", "medications", "pharmacy",
-        "diagnosis", "condition", "problem",
-        "procedure", "treatment",
+        "allergies", "medications", "pharmacy", "drug", "allergy",
+        "diagnosis", "condition", "problem", "history",
+        "procedure", "treatment", "surgery", "operation",
         // Provider
         "physician", "doctor", "provider", "referring",
-        "facility", "department", "clinic",
+        "facility", "department", "clinic", "hospital",
+        "primary care", "pcp", "specialist",
         // Administrative
-        "signature", "date", "signed",
-        "reason", "visit", "chief complaint",
-        "authorization", "consent",
+        "signature", "date", "signed", "today",
+        "reason", "visit", "chief complaint", "purpose",
+        "authorization", "consent", "release", "hipaa",
+        "effective date", "completion", "form",
         // Vitals
         "height", "weight", "blood pressure", "bp",
+        "temperature", "pulse", "heart rate",
         // Demographics
         "race", "ethnicity", "marital", "language",
         "marital status", "preferred language", "religion",
-        "guarantor", "responsible party",
+        "guarantor", "responsible party", "guardian",
+        "citizenship", "nationality", "veteran", "military",
     ]
 
     /// Extract field-label candidates from OCR lines using heuristics.
@@ -456,6 +572,387 @@ final class KTCDemo: ObservableObject {
         }
 
         return fields
+    }
+
+    // MARK: - Spatial Analysis
+
+    /// Find values on the form that are spatially associated with each label.
+    /// Looks for text to the RIGHT of or BELOW each label bounding box.
+    nonisolated static func associateValuesWithLabels(_ fields: inout [KTCField], allLines: [KTCRecognizedLine]) {
+        // Build a set of label bounding boxes to exclude from value candidates
+        let labelBoxes = Set(fields.map { $0.labelBoundingBox })
+
+        for i in fields.indices {
+            let label = fields[i]
+            let box = label.labelBoundingBox
+
+            // Find candidate value lines (not already used as labels)
+            var bestCandidate: (line: KTCRecognizedLine, score: Double)?
+
+            for line in allLines {
+                // Skip if this line's box is a label
+                if labelBoxes.contains(line.boundingBox) { continue }
+                // Skip low confidence
+                if line.confidence < 0.5 { continue }
+                // Skip very short text (likely noise)
+                if line.text.trimmingCharacters(in: .whitespaces).count < 2 { continue }
+
+                let lineBox = line.boundingBox
+                let score = spatialScore(labelBox: box, candidateBox: lineBox)
+
+                if score > 0 {
+                    if bestCandidate == nil || score > bestCandidate!.score {
+                        bestCandidate = (line, score)
+                    }
+                }
+            }
+
+            if let best = bestCandidate {
+                fields[i].detectedValue = best.line.text.trimmingCharacters(in: .whitespaces)
+                fields[i].valueBoundingBox = best.line.boundingBox
+            }
+        }
+    }
+
+    /// Calculate a spatial affinity score between a label and a potential value.
+    /// Higher score = better candidate. Returns 0 if not a valid spatial relationship.
+    /// Vision coords: normalized (0-1), origin bottom-left.
+    private nonisolated static func spatialScore(labelBox: CGRect, candidateBox: CGRect) -> Double {
+        // Horizontal overlap/proximity
+        let labelMidY = labelBox.midY
+        let candMidY = candidateBox.midY
+        let verticalDistance = abs(labelMidY - candMidY)
+        let labelHeight = labelBox.height
+
+        // Case 1: Same line (to the RIGHT of label)
+        // Candidate should be roughly same Y level and to the right
+        if verticalDistance < labelHeight * 1.5 {
+            let horizontalGap = candidateBox.minX - labelBox.maxX
+            // Must be to the right, with reasonable gap
+            if horizontalGap > 0 && horizontalGap < 0.3 {
+                // Score: closer horizontally = better, penalize vertical misalignment
+                let hScore = 1.0 - (horizontalGap / 0.3)
+                let vPenalty = verticalDistance / (labelHeight * 1.5)
+                return hScore * (1.0 - vPenalty * 0.5) * 1.0  // weight for "right of"
+            }
+        }
+
+        // Case 2: Line below (candidate Y is lower in Vision coords)
+        // Candidate should be roughly same X (or slightly right) and below
+        let labelMidX = labelBox.midX
+        let candMidX = candidateBox.midX
+        let horizontalDistance = abs(labelMidX - candMidX)
+
+        if candidateBox.maxY < labelBox.minY {  // candidate is below label (lower Y in Vision)
+            let verticalGap = labelBox.minY - candidateBox.maxY
+            // Must be reasonably close vertically and horizontally aligned
+            if verticalGap < 0.1 && horizontalDistance < labelBox.width * 2 {
+                let vScore = 1.0 - (verticalGap / 0.1)
+                let hPenalty = horizontalDistance / (labelBox.width * 2)
+                return vScore * (1.0 - hPenalty * 0.5) * 0.8  // slightly lower weight for "below"
+            }
+        }
+
+        return 0
+    }
+
+    // MARK: - Checkbox Detection
+
+    /// Characters that indicate an unchecked checkbox in OCR.
+    private static let uncheckedPatterns: Set<Character> = ["☐", "□", "◯", "○", "◻"]
+    /// Characters that indicate a checked checkbox in OCR.
+    private static let checkedPatterns: Set<Character> = ["☑", "☒", "■", "●", "◼", "✓", "✔", "✗", "✘", "×"]
+
+    /// Detect checkboxes from OCR lines and return them with associated text.
+    nonisolated static func detectCheckboxes(from lines: [KTCRecognizedLine]) -> [KTCCheckbox] {
+        var checkboxes: [KTCCheckbox] = []
+
+        for line in lines {
+            let text = line.text
+            var currentIndex = text.startIndex
+
+            while currentIndex < text.endIndex {
+                let char = text[currentIndex]
+
+                // Check for checkbox character patterns
+                let isUnchecked = uncheckedPatterns.contains(char)
+                let isChecked = checkedPatterns.contains(char)
+
+                if isUnchecked || isChecked {
+                    // Extract associated text (after the checkbox on the same line)
+                    let afterIndex = text.index(after: currentIndex)
+                    let associatedText = afterIndex < text.endIndex
+                        ? String(text[afterIndex...]).trimmingCharacters(in: .whitespaces)
+                        : nil
+
+                    checkboxes.append(KTCCheckbox(
+                        boundingBox: line.boundingBox,
+                        isChecked: isChecked,
+                        associatedText: associatedText?.isEmpty == true ? nil : associatedText
+                    ))
+                }
+
+                // Also check for text patterns like "[x]", "[ ]", "(x)", "( )"
+                if char == "[" || char == "(" {
+                    let closeChar: Character = char == "[" ? "]" : ")"
+                    if let closeIndex = text[currentIndex...].firstIndex(of: closeChar) {
+                        let inside = String(text[text.index(after: currentIndex)..<closeIndex])
+                            .trimmingCharacters(in: .whitespaces)
+                            .lowercased()
+
+                        let isEmpty = inside.isEmpty || inside == " "
+                        let isFilled = inside == "x" || inside == "✓" || inside == "*"
+
+                        if isEmpty || isFilled {
+                            let afterClose = text.index(after: closeIndex)
+                            let associatedText = afterClose < text.endIndex
+                                ? String(text[afterClose...]).trimmingCharacters(in: .whitespaces)
+                                : nil
+
+                            checkboxes.append(KTCCheckbox(
+                                boundingBox: line.boundingBox,
+                                isChecked: isFilled,
+                                associatedText: associatedText?.isEmpty == true ? nil : associatedText
+                            ))
+                            currentIndex = closeIndex
+                        }
+                    }
+                }
+
+                currentIndex = text.index(after: currentIndex)
+            }
+        }
+
+        return checkboxes
+    }
+
+    // MARK: - Checkbox Grouping
+
+    /// Known checkbox group patterns that should be matched together.
+    /// Maps group label patterns → (keypath, option values to match)
+    private static let checkboxGroupPatterns: [(labelPatterns: [String], keypath: String, optionMappings: [String: String])] = [
+        // Sex/Gender: "M", "F", "Male", "Female" → patient.sex
+        (["sex", "gender", "sex gender", "male female", "m f"],
+         "patient.sex",
+         ["male": "M", "m": "M", "female": "F", "f": "F"]),
+
+        // Yes/No patterns (generic - could map to various fields)
+        (["yes no", "y n"],
+         "",  // No specific keypath - contextual
+         ["yes": "true", "y": "true", "no": "false", "n": "false"]),
+
+        // Marital status
+        (["marital", "marital status"],
+         "patient.maritalStatus",
+         ["single": "S", "married": "M", "divorced": "D", "widowed": "W", "separated": "SEP"]),
+    ]
+
+    /// Group checkboxes that appear on the same line or are spatially close.
+    nonisolated static func groupCheckboxes(_ checkboxes: [KTCCheckbox], allLines: [KTCRecognizedLine]) -> [KTCCheckboxGroup] {
+        var groups: [KTCCheckboxGroup] = []
+        var usedCheckboxIndices: Set<Int> = []
+
+        // Strategy 1: Group checkboxes on the same OCR line (same boundingBox Y)
+        let checkboxesByLine = Dictionary(grouping: checkboxes.enumerated()) { (_, cb) in
+            // Round Y to group checkboxes on same line (within tolerance)
+            Int(cb.boundingBox.midY * 1000)
+        }
+
+        for (_, lineCheckboxes) in checkboxesByLine {
+            let indices = lineCheckboxes.map { $0.offset }
+            let cbs = lineCheckboxes.map { $0.element }
+
+            // If 2+ checkboxes on same line, they're likely a group
+            if cbs.count >= 2 {
+                // Combine bounding boxes
+                let minX = cbs.map { $0.boundingBox.minX }.min() ?? 0
+                let maxX = cbs.map { $0.boundingBox.maxX }.max() ?? 1
+                let minY = cbs.map { $0.boundingBox.minY }.min() ?? 0
+                let maxY = cbs.map { $0.boundingBox.maxY }.max() ?? 1
+                let combinedBox = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+
+                // Try to find a group label from the line text
+                let groupLabel = findGroupLabel(for: cbs, allLines: allLines)
+
+                var group = KTCCheckboxGroup(
+                    boundingBox: combinedBox,
+                    options: cbs,
+                    groupLabel: groupLabel
+                )
+
+                // Try to match to a known pattern
+                if let label = groupLabel?.lowercased() {
+                    for pattern in checkboxGroupPatterns {
+                        if pattern.labelPatterns.contains(where: { label.contains($0) }) {
+                            group.mappedKeypath = pattern.keypath.isEmpty ? nil : pattern.keypath
+                            break
+                        }
+                    }
+                }
+
+                // Also check if option texts match known patterns (e.g., "Male", "Female")
+                let optionTexts = cbs.compactMap { $0.associatedText?.lowercased() }
+                for pattern in checkboxGroupPatterns {
+                    let matchCount = optionTexts.filter { pattern.optionMappings.keys.contains($0) }.count
+                    if matchCount >= 2 {
+                        group.mappedKeypath = pattern.keypath.isEmpty ? nil : pattern.keypath
+                        break
+                    }
+                }
+
+                groups.append(group)
+                usedCheckboxIndices.formUnion(indices)
+            }
+        }
+
+        // Strategy 2: Standalone checkboxes (not part of a group) - create single-option "groups"
+        for (idx, cb) in checkboxes.enumerated() {
+            if !usedCheckboxIndices.contains(idx) {
+                // Single checkbox - might be a yes/no toggle or consent checkbox
+                var group = KTCCheckboxGroup(
+                    boundingBox: cb.boundingBox,
+                    options: [cb],
+                    groupLabel: cb.associatedText
+                )
+                // If it was already checked on the form, mark it
+                if cb.isChecked {
+                    group.selectedIndex = 0
+                }
+                groups.append(group)
+            }
+        }
+
+        return groups
+    }
+
+    /// Find a label that describes a checkbox group (e.g., "Sex:" before "Male ☐ Female ☐").
+    private nonisolated static func findGroupLabel(for checkboxes: [KTCCheckbox], allLines: [KTCRecognizedLine]) -> String? {
+        guard let firstCB = checkboxes.first else { return nil }
+        let cbBox = firstCB.boundingBox
+
+        // Look for text to the LEFT of the checkboxes on roughly the same line
+        for line in allLines {
+            let lineBox = line.boundingBox
+            // Same vertical level?
+            let verticalOverlap = abs(lineBox.midY - cbBox.midY) < cbBox.height * 1.5
+            // To the left?
+            let isToLeft = lineBox.maxX < cbBox.minX && (cbBox.minX - lineBox.maxX) < 0.2
+
+            if verticalOverlap && isToLeft {
+                let text = line.text.trimmingCharacters(in: .whitespaces)
+                // Remove trailing colon
+                let cleaned = text.hasSuffix(":") ? String(text.dropLast()) : text
+                if !cleaned.isEmpty && cleaned.count < 30 {
+                    return cleaned
+                }
+            }
+        }
+
+        // Check if the checkbox option texts themselves indicate the group type
+        let optionTexts = checkboxes.compactMap { $0.associatedText?.lowercased() }
+        if optionTexts.contains("male") || optionTexts.contains("female") {
+            return "Sex"
+        }
+        if optionTexts.contains("yes") || optionTexts.contains("no") {
+            return "Yes/No"
+        }
+        if optionTexts.contains("married") || optionTexts.contains("single") {
+            return "Marital Status"
+        }
+
+        return nil
+    }
+
+    // MARK: - Auto-Check Logic
+
+    /// Auto-check the correct checkbox in each group based on patient data.
+    nonisolated static func autoCheckCheckboxGroups(_ groups: inout [KTCCheckboxGroup], using data: [String: String]) {
+        for i in groups.indices {
+            // Skip if only one option (standalone checkbox)
+            guard groups[i].options.count > 1 else { continue }
+
+            // Get the patient value for this group's keypath
+            guard let keypath = groups[i].mappedKeypath,
+                  let patientValue = data[keypath]?.lowercased() else { continue }
+
+            // Find which option matches the patient value
+            for (optIdx, option) in groups[i].options.enumerated() {
+                guard let optionText = option.associatedText?.lowercased() else { continue }
+
+                // Direct match
+                if optionText == patientValue {
+                    groups[i].selectedIndex = optIdx
+                    groups[i].options[optIdx].isChecked = true
+                    break
+                }
+
+                // Check against known mappings
+                for pattern in checkboxGroupPatterns {
+                    if let mappedValue = pattern.optionMappings[optionText],
+                       mappedValue.lowercased() == patientValue {
+                        groups[i].selectedIndex = optIdx
+                        groups[i].options[optIdx].isChecked = true
+                        break
+                    }
+                }
+
+                if groups[i].selectedIndex != nil { break }
+
+                // Fuzzy match: "F" matches "Female", "M" matches "Male"
+                if patientValue == "f" && (optionText.hasPrefix("f") || optionText == "female") {
+                    groups[i].selectedIndex = optIdx
+                    groups[i].options[optIdx].isChecked = true
+                    break
+                }
+                if patientValue == "m" && (optionText.hasPrefix("m") || optionText == "male") {
+                    groups[i].selectedIndex = optIdx
+                    groups[i].options[optIdx].isChecked = true
+                    break
+                }
+            }
+        }
+    }
+
+    /// Classify field types and create checkbox fields for detected checkboxes.
+    nonisolated static func classifyFieldTypes(_ fields: inout [KTCField], checkboxes: [KTCCheckbox], allLines: [KTCRecognizedLine]) {
+        // Mark fields as checkbox type if they contain checkbox-related terms
+        let checkboxTerms = ["male", "female", "yes", "no", "married", "single", "divorced", "widowed"]
+
+        for i in fields.indices {
+            let lower = fields[i].label.lowercased()
+
+            // Check if label suggests a checkbox (yes/no, male/female, etc.)
+            if checkboxTerms.contains(where: { lower.contains($0) }) {
+                fields[i].fieldType = .checkbox
+            }
+
+            // Check if label is about signatures
+            if lower.contains("signature") || lower.contains("sign here") {
+                fields[i].fieldType = .signature
+            }
+
+            // Check if label is specifically a date field
+            if lower.contains("date") && !lower.contains("birth") {
+                fields[i].fieldType = .date
+            }
+        }
+
+        // Create fields for standalone checkboxes that aren't part of existing fields
+        for checkbox in checkboxes {
+            if let text = checkbox.associatedText, !text.isEmpty {
+                // Check if this checkbox text is already a field
+                let alreadyExists = fields.contains { $0.label.lowercased() == text.lowercased() }
+                if !alreadyExists && text.count <= 30 {
+                    var field = KTCField(
+                        label: text,
+                        labelBoundingBox: checkbox.boundingBox
+                    )
+                    field.fieldType = .checkbox
+                    field.isChecked = checkbox.isChecked
+                    fields.append(field)
+                }
+            }
+        }
     }
 }
 
@@ -552,128 +1049,222 @@ enum KTCPatientDataLoader {
     /// Maps normalized label text → canonical keypath tail.
     /// Multiple synonyms can point to the same keypath.
     private static let synonyms: [(patterns: [String], keypath: String)] = [
-        // Name
+        // ===== NAME =====
         (["full name", "patient name", "participant name", "name of patient",
-          "patient s name", "patients name", "name last first",
-          "name last first middle", "print name", "printed name"], "patient.fullName"),
-        (["first name", "given name", "first", "forename"], "patient.firstName"),
-        (["last name", "surname", "family name", "last"], "patient.lastName"),
-        (["middle name", "middle initial", "middle", "mi"], "patient.middleName"),
-        // DOB / Age
+          "patient s name", "patients name", "name last first", "legal name",
+          "name last first middle", "print name", "printed name", "name print",
+          "name please print", "name of insured", "insured name", "insured s name",
+          "name of applicant", "applicant name", "your name", "client name",
+          "individual name", "person name", "name of individual"], "patient.fullName"),
+        (["first name", "given name", "first", "forename", "fname",
+          "patient first name", "legal first name"], "patient.firstName"),
+        (["last name", "surname", "family name", "last", "lname",
+          "patient last name", "legal last name"], "patient.lastName"),
+        (["middle name", "middle initial", "middle", "mi", "m i",
+          "middle i", "mname"], "patient.middleName"),
+
+        // ===== DOB / AGE =====
         (["dob", "date of birth", "birth date", "birthday", "birthdate",
-          "d o b", "d o b ", "born", "birth"], "_computed.dobFormatted"),
-        (["age", "patient age"], "_computed.patientAge"),
-        // Sex / Gender
-        (["sex", "gender", "sex gender", "sex or gender",
-          "male female", "male   female", "m f"], "patient.sex"),
-        // Contact
+          "d o b", "d o b ", "born", "birth", "patient dob", "patient date of birth",
+          "patient s date of birth", "date of birth mm dd yyyy", "date of birth mm dd yy",
+          "birthdate mm dd yyyy", "b date"], "_computed.dobFormatted"),
+        (["age", "patient age", "current age", "age years", "age yrs"], "_computed.patientAge"),
+
+        // ===== SEX / GENDER =====
+        (["sex", "gender", "sex gender", "sex or gender", "patient sex",
+          "male female", "male   female", "m f", "m or f", "patient gender",
+          "biological sex", "sex at birth", "gender identity"], "patient.sex"),
+
+        // ===== PHONE =====
         (["phone", "telephone", "cell", "mobile", "phone number", "tel",
-          "cell phone", "home phone", "daytime phone", "phone no",
-          "contact number", "contact phone", "primary phone",
-          "telephone number"], "patient.phone"),
+          "cell phone", "home phone", "daytime phone", "phone no", "ph",
+          "contact number", "contact phone", "primary phone", "main phone",
+          "telephone number", "phone home", "phone cell", "phone mobile",
+          "best phone", "preferred phone", "callback number", "patient phone",
+          "patient telephone", "evening phone", "day phone"], "patient.phone"),
+
+        // ===== EMAIL =====
         (["email", "e mail", "email address", "e mail address",
-          "electronic mail"], "patient.email"),
-        // Address
+          "electronic mail", "patient email", "email id", "e mail id",
+          "contact email", "preferred email"], "patient.email"),
+
+        // ===== ADDRESS =====
         (["address", "street", "street address", "address line 1",
           "address 1", "line 1", "mailing address", "home address",
-          "street address line 1", "residential address"], "patient.address.line1"),
+          "street address line 1", "residential address", "residence",
+          "current address", "physical address", "patient address",
+          "home street address", "street name", "street number",
+          "address street", "address number and street"], "patient.address.line1"),
         (["address line 2", "address 2", "line 2", "apt", "suite",
-          "unit", "apt suite", "apartment"], "patient.address.line2"),
-        (["city", "city town"], "patient.address.city"),
-        (["state", "state province", "st"], "patient.address.state"),
+          "unit", "apt suite", "apartment", "apt no", "suite no", "unit no",
+          "apt number", "suite number", "unit number", "floor",
+          "building", "bldg"], "patient.address.line2"),
+        (["city", "city town", "town", "municipality", "city name"], "patient.address.city"),
+        (["state", "state province", "st", "province", "state code"], "patient.address.state"),
         (["zip", "zip code", "zipcode", "postal code", "postal",
-          "zip postal", "zip 4"], "patient.address.postalCode"),
-        // Insurance
+          "zip postal", "zip 4", "zip 5", "zip plus 4", "zip code 5 digit",
+          "postal zip"], "patient.address.postalCode"),
+        (["full address", "complete address", "mailing address full",
+          "address city state zip", "street city state zip"], "patient.fullAddress"),
+
+        // ===== INSURANCE =====
         (["member id", "member no", "member number", "subscriber id",
           "subscriber", "id number", "identification number",
-          "subscriber number", "policy number", "policy no",
-          "insurance id", "insured id"], "patient.insurance.memberId"),
+          "subscriber number", "policy number", "policy no", "policy id",
+          "insurance id", "insured id", "insured s id", "contract number",
+          "certificate number", "member identification", "id no",
+          "insurance member id", "health plan id", "plan id number"], "patient.insurance.memberId"),
         (["group", "group id", "group no", "group number",
-          "grp", "grp no", "group plan"], "patient.insurance.groupId"),
+          "grp", "grp no", "group plan", "group name", "group policy",
+          "employer group", "employer group number", "rx group",
+          "rx grp", "rxgrp", "bin", "pcn"], "patient.insurance.groupId"),
         (["payer", "insurance", "insurance company", "plan", "carrier",
           "health plan", "insurance plan", "insurance name",
-          "insurance carrier", "plan name", "insurer"], "patient.insurance.payer"),
-        // Full address (single-line)
-        (["full address", "complete address", "mailing address full"], "patient.fullAddress"),
-        // Today's date
+          "insurance carrier", "plan name", "insurer", "insurance provider",
+          "health insurance", "medical insurance", "insurance co",
+          "name of insurance", "name of health plan", "name of carrier",
+          "primary insurance", "secondary insurance"], "patient.insurance.payer"),
+
+        // ===== TODAY'S DATE =====
         (["today s date", "todays date", "today date", "current date",
           "date signed", "date of signature", "signature date",
-          "date today"], "_computed.todayDate"),
+          "date today", "today", "date completed", "completion date",
+          "form date", "date of form", "effective date",
+          "date of authorization", "authorization date"], "_computed.todayDate"),
         // Date (standalone — most forms mean "today's date")
         (["date"], "_computed.todayDate"),
     ]
 
     // MARK: - Fuzzy Match
 
-    /// Try to match a label string to a keypath. Returns (keypath, value) or nil.
-    static func fuzzyMatch(label: String, in data: [String: String]) -> (keypath: String, value: String)? {
+    struct MatchResult {
+        let keypath: String
+        let value: String
+        let confidence: Double  // 0-1
+        let method: String  // "synonym-exact", "synonym-contains", "token", "embedding"
+    }
+
+    /// Try to match a label string to a keypath with confidence scoring.
+    static func fuzzyMatch(label: String, in data: [String: String]) -> MatchResult? {
         let normalized = normalize(label)
 
-        // 1. Exact synonym match
+        // 1. Exact synonym match (confidence: 1.0)
         for entry in synonyms {
             for pattern in entry.patterns {
                 if normalized == pattern {
                     if let value = data[entry.keypath] {
-                        return (entry.keypath, value)
+                        return MatchResult(keypath: entry.keypath, value: value,
+                                           confidence: 1.0, method: "synonym-exact")
                     }
                 }
             }
         }
 
-        // 2. Whole-word substring match (label contains a synonym as complete words)
+        // 2. Whole-word substring match (confidence: 0.9)
         for entry in synonyms {
             for pattern in entry.patterns {
                 if pattern.count >= 3 && containsWholeWords(normalized, pattern: pattern) {
                     if let value = data[entry.keypath] {
-                        return (entry.keypath, value)
+                        return MatchResult(keypath: entry.keypath, value: value,
+                                           confidence: 0.9, method: "synonym-contains")
                     }
                 }
             }
         }
 
-        // 3. Token overlap with keypath tails
+        // 3. Token overlap with keypath tails (confidence: based on Jaccard score)
         let labelTokens = tokenize(normalized)
-        guard !labelTokens.isEmpty else { return nil }
+        if !labelTokens.isEmpty {
+            var bestScore: Double = 0
+            var bestKeypath: String?
 
-        var bestScore: Double = 0
-        var bestKeypath: String?
+            for keypath in data.keys {
+                let tail = keypath.components(separatedBy: ".").last ?? keypath
+                let keypathTokens = tokenize(camelCaseToWords(tail))
+                guard !keypathTokens.isEmpty else { continue }
 
-        for keypath in data.keys {
-            // Extract the tail of the keypath (e.g., "patient.address.city" → "city")
-            let tail = keypath.components(separatedBy: ".").last ?? keypath
-            let keypathTokens = tokenize(camelCaseToWords(tail))
+                let labelSet = Set(labelTokens)
+                let keypathSet = Set(keypathTokens)
+                let intersection = labelSet.intersection(keypathSet).count
+                let union = labelSet.union(keypathSet).count
+                let score = Double(intersection) / Double(union)
 
-            guard !keypathTokens.isEmpty else { continue }
+                if score > bestScore {
+                    bestScore = score
+                    bestKeypath = keypath
+                }
+            }
 
-            // Jaccard-like overlap score
-            let labelSet = Set(labelTokens)
-            let keypathSet = Set(keypathTokens)
-            let intersection = labelSet.intersection(keypathSet).count
-            let union = labelSet.union(keypathSet).count
-            let score = Double(intersection) / Double(union)
-
-            if score > bestScore {
-                bestScore = score
-                bestKeypath = keypath
+            if bestScore >= 0.5, let keypath = bestKeypath, let value = data[keypath] {
+                return MatchResult(keypath: keypath, value: value,
+                                   confidence: bestScore * 0.8, method: "token")
             }
         }
 
-        // Require a minimum threshold
-        if bestScore >= 0.5, let keypath = bestKeypath, let value = data[keypath] {
-            return (keypath, value)
+        // 4. NLEmbedding semantic similarity (confidence: based on cosine distance)
+        if let embeddingMatch = embeddingMatch(label: normalized, in: data) {
+            return embeddingMatch
         }
 
         return nil
     }
 
-    /// Apply fuzzy matching to all fields.
+    /// Use NLEmbedding to find semantically similar keypaths.
+    private static func embeddingMatch(label: String, in data: [String: String]) -> MatchResult? {
+        // Get the word embedding model for English
+        guard let embedding = NLEmbedding.wordEmbedding(for: .english) else {
+            return nil
+        }
+
+        var bestDistance: Double = 2.0  // Max cosine distance is 2.0
+        var bestKeypath: String?
+
+        for keypath in data.keys {
+            // Convert keypath tail to readable words
+            let tail = keypath.components(separatedBy: ".").last ?? keypath
+            let readableTail = camelCaseToWords(tail)
+
+            // Compare the main word in the label to the keypath tail
+            let labelWords = label.lowercased().components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            for labelWord in labelWords {
+                // Skip very short words
+                if labelWord.count < 3 { continue }
+
+                let tailWords = readableTail.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                for tailWord in tailWords {
+                    if tailWord.count < 3 { continue }
+
+                    // NLEmbedding requires lowercase
+                    let distance = embedding.distance(between: labelWord, and: tailWord)
+                    if distance < bestDistance {
+                        bestDistance = distance
+                        bestKeypath = keypath
+                    }
+                }
+            }
+        }
+
+        // Convert distance to confidence (distance 0 = identical, distance ~1 = unrelated)
+        // Require distance < 0.8 for a match (fairly strict)
+        if bestDistance < 0.8, let keypath = bestKeypath, let value = data[keypath] {
+            let confidence = max(0, (0.8 - bestDistance) / 0.8) * 0.7  // Scale to max 0.7
+            return MatchResult(keypath: keypath, value: value,
+                               confidence: confidence, method: "embedding")
+        }
+
+        return nil
+    }
+
+    /// Apply fuzzy matching to all fields with confidence scoring.
     static func applyMappings(to fields: inout [KTCField], using data: [String: String]) {
         for i in fields.indices {
             let label = fields[i].label
             if let match = fuzzyMatch(label: label, in: data) {
                 fields[i].mappedKeypath = match.keypath
                 fields[i].value = match.value
-                logger.info("Mapped '\(label)' → \(match.keypath) = \(match.value)")
+                fields[i].matchConfidence = match.confidence
+                fields[i].matchMethod = match.method
+                logger.info("Mapped '\(label)' → \(match.keypath) [\(match.method), \(String(format: "%.0f", match.confidence * 100))%]")
             } else {
                 logger.info("No match for '\(label)'")
             }
