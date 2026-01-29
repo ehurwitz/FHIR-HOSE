@@ -6,8 +6,32 @@
 //
 
 import SwiftUI
+import UIKit
 import VisionKit
 import OSLog
+
+// MARK: - Haptic Feedback Helper
+
+enum Haptics {
+    static func light() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+    static func medium() {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+    static func success() {
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+    static func warning() {
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+    }
+    static func error() {
+        UINotificationFeedbackGenerator().notificationOccurred(.error)
+    }
+    static func selection() {
+        UISelectionFeedbackGenerator().selectionChanged()
+    }
+}
 
 struct KTCDemoView: View {
     @StateObject private var vm = KTCDemo()
@@ -18,7 +42,23 @@ struct KTCDemoView: View {
     @State private var showCopiedToast = false
     @State private var showShareSheet = false
     @State private var exportPDFURL: URL?
+    @State private var showSignatureCanvas = false
+    @State private var showPDFPreview = false
+    @State private var previewPDFURL: URL?
     private let logger = Logger(subsystem: "com.fhirhose.app", category: "KTCDemoView")
+
+    // Completion tracking
+    private var completionProgress: Double {
+        let totalFields = vm.fields.count + (vm.signatureField != nil ? 1 : 0)
+        guard totalFields > 0 else { return 0 }
+        let filledFields = vm.fields.filter { !$0.value.isEmpty }.count
+        let signatureFilled = vm.hasSignature ? 1 : 0
+        return Double(filledFields + signatureFilled) / Double(totalFields)
+    }
+
+    private var isComplete: Bool {
+        completionProgress >= 1.0
+    }
 
     var body: some View {
         Group {
@@ -63,14 +103,46 @@ struct KTCDemoView: View {
                 KTCExpandedImageView(
                     image: firstPage,
                     fields: vm.fields,
-                    showLabelBoxes: $showLabelBoxes
+                    checkboxGroups: vm.checkboxGroups,
+                    showLabelBoxes: $showLabelBoxes,
+                    vm: vm
                 )
             }
         }
         .sheet(isPresented: $showShareSheet) {
             if let url = exportPDFURL {
-                KTCShareSheet(items: [url])
+                ShareSheetView(url: url)
             }
+        }
+        .sheet(isPresented: $showPDFPreview) {
+            if let url = previewPDFURL {
+                PDFPreviewSheet(
+                    url: url,
+                    onShare: {
+                        exportPDFURL = url
+                        showPDFPreview = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            showShareSheet = true
+                        }
+                    },
+                    onDismiss: {
+                        showPDFPreview = false
+                    }
+                )
+            }
+        }
+        .fullScreenCover(isPresented: $showSignatureCanvas) {
+            KTCSignatureCanvas(
+                signatureImage: $vm.signatureImage,
+                onSave: { image in
+                    vm.updateSignature(image)
+                    Haptics.success()
+                    showSignatureCanvas = false
+                },
+                onCancel: {
+                    showSignatureCanvas = false
+                }
+            )
         }
     }
 
@@ -95,12 +167,11 @@ struct KTCDemoView: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                Label("Scan or photograph a paper form", systemImage: "camera.viewfinder")
-                Label("OCR detects field labels automatically", systemImage: "text.viewfinder")
-                Label("Patient data is fuzzy-matched to fields", systemImage: "person.text.rectangle")
-                Label("Review, edit, and export the result", systemImage: "pencil.and.list.clipboard")
+                FeatureRow(icon: "camera.viewfinder", text: "Scan or photograph a paper form")
+                FeatureRow(icon: "text.viewfinder", text: "OCR detects field labels automatically")
+                FeatureRow(icon: "person.text.rectangle", text: "Patient data is fuzzy-matched to fields")
+                FeatureRow(icon: "pencil.and.list.clipboard", text: "Review, edit, and export the result")
             }
-            .font(.subheadline)
             .padding()
             .background(Color(.systemGray6))
             .cornerRadius(12)
@@ -187,7 +258,12 @@ struct KTCDemoView: View {
                     KTCOverlayView(
                         image: firstPage,
                         fields: vm.fields,
-                        showLabelBoxes: showLabelBoxes
+                        showLabelBoxes: showLabelBoxes,
+                        checkboxGroups: vm.checkboxGroups,
+                        signatureImage: vm.hasSignature ? vm.signatureImage : nil,
+                        signatureField: vm.signatureField,
+                        signatureSize: vm.signatureSize,
+                        signatureNormalizedPos: vm.signatureNormalizedPosition
                     )
                     .frame(height: 220)
                     .cornerRadius(8)
@@ -206,27 +282,26 @@ struct KTCDemoView: View {
                 }
 
                 // Controls row
-                HStack {
-                    Toggle("Boxes", isOn: $showLabelBoxes)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                    Text("Label boxes")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                VStack(spacing: 8) {
+                    HStack {
+                        Toggle("Boxes", isOn: $showLabelBoxes)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                        Text("Label boxes")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
 
-                    Spacer()
-
+                    // Stats in a flexible grid
                     let matched = vm.fields.filter { $0.mappedKeypath != nil }.count
                     let detected = vm.fields.filter { $0.detectedValue != nil }.count
-                    Label("\(vm.recognizedLines.count) lines", systemImage: "text.alignleft")
-                    Spacer()
-                    Label("\(vm.fields.count) fields", systemImage: "tag")
-                    Spacer()
-                    Label("\(detected) detected", systemImage: "doc.text.magnifyingglass")
-                        .foregroundColor(detected > 0 ? .orange : .secondary)
-                    Spacer()
-                    Label("\(matched) matched", systemImage: "checkmark.circle")
-                        .foregroundColor(matched > 0 ? .green : .secondary)
+                    HStack(spacing: 12) {
+                        StatBadge(icon: "text.alignleft", value: "\(vm.recognizedLines.count)", label: "lines")
+                        StatBadge(icon: "tag", value: "\(vm.fields.count)", label: "fields")
+                        StatBadge(icon: "doc.text.magnifyingglass", value: "\(detected)", label: "detected", color: detected > 0 ? .orange : .secondary)
+                        StatBadge(icon: "checkmark.circle", value: "\(matched)", label: "matched", color: matched > 0 ? .green : .secondary)
+                    }
                 }
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -277,12 +352,12 @@ struct KTCDemoView: View {
                                         }
                                     }
 
-                                    // Checkbox options
-                                    HStack(spacing: 16) {
+                                    // Checkbox options - use FlowLayout for wrapping
+                                    FlowLayout(spacing: 12) {
                                         ForEach(group.options.indices, id: \.self) { optIdx in
                                             let option = group.options[optIdx]
                                             Button {
-                                                // Toggle this checkbox
+                                                Haptics.selection()
                                                 vm.toggleCheckbox(groupIndex: groupIdx, optionIndex: optIdx)
                                             } label: {
                                                 HStack(spacing: 4) {
@@ -291,6 +366,7 @@ struct KTCDemoView: View {
                                                     Text(option.associatedText ?? "Option \(optIdx + 1)")
                                                         .font(.subheadline)
                                                         .foregroundColor(option.isChecked ? .primary : .secondary)
+                                                        .lineLimit(1)
                                                 }
                                             }
                                             .buttonStyle(.plain)
@@ -338,129 +414,201 @@ struct KTCDemoView: View {
                     .padding(.top, 4)
 
                     ForEach($vm.fields) { $field in
-                        VStack(alignment: .leading, spacing: 8) {
-                            // Label (from OCR)
-                            HStack {
-                                Text(field.label)
-                                    .font(.headline)
-                                Spacer()
-                                if field.detectedValue != nil {
-                                    Image(systemName: "doc.text.magnifyingglass")
-                                        .font(.caption)
-                                        .foregroundColor(.green)
-                                }
-                            }
+                        KTCFieldCard(field: $field, vm: vm)
+                    }
+                }
 
-                            // Show detected value from form (if any)
-                            if let detected = field.detectedValue, !detected.isEmpty {
-                                HStack {
-                                    Text("On form:")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    Text(detected)
-                                        .font(.caption)
-                                        .foregroundColor(.green)
-                                        .lineLimit(1)
-                                }
-                            }
+                Divider()
 
-                            // Keypath picker with confidence indicator
+                // Signature Section
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Image(systemName: "signature")
+                            .foregroundColor(.indigo)
+                        Text("Signature")
+                            .font(.headline)
+                        Spacer()
+                        if vm.hasSignature {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                        }
+                    }
+
+                    if vm.hasSignature {
+                        // Show signature preview (transparent background, just the strokes)
+                        if let sigImage = vm.signatureImage {
+                            Image(uiImage: sigImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(height: 60)
+                                .padding(8)
+                                .background(
+                                    // Checkerboard pattern to show transparency
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .fill(Color(.systemGray5))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                                )
+                        }
+
+                        // Signature placement picker
+                        let signatureFields = vm.fields.filter { $0.fieldType == .signature || $0.label.lowercased().contains("sign") }
+                        if !signatureFields.isEmpty {
                             HStack {
-                                Text("Map to:")
+                                Text("Place at:")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
-                                Picker("Keypath", selection: Binding<String>(
-                                    get: { field.mappedKeypath ?? "__none__" },
+                                Picker("", selection: Binding<String>(
+                                    get: { vm.signatureFieldId?.uuidString ?? "" },
                                     set: { newVal in
-                                        let kp = newVal == "__none__" ? nil : newVal
-                                        vm.updateFieldKeypath(id: field.id, newKeypath: kp)
+                                        if newVal.isEmpty {
+                                            vm.setSignatureField(id: nil)
+                                        } else if let uuid = UUID(uuidString: newVal) {
+                                            vm.setSignatureField(id: uuid)
+                                        }
                                     }
                                 )) {
-                                    Text("None").tag("__none__")
-                                    ForEach(vm.sortedKeypaths, id: \.self) { kp in
-                                        Text(vm.displayName(for: kp)).tag(kp)
+                                    Text("Auto").tag("")
+                                    ForEach(signatureFields) { field in
+                                        Text(field.label).tag(field.id.uuidString)
                                     }
                                 }
                                 .pickerStyle(.menu)
                                 .tint(.indigo)
-
-                                // Confidence badge
-                                if field.mappedKeypath != nil && field.matchConfidence > 0 {
-                                    Text("\(Int(field.matchConfidence * 100))%")
-                                        .font(.caption2)
-                                        .fontWeight(.medium)
-                                        .foregroundColor(.white)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(confidenceColor(field.matchConfidence))
-                                        .cornerRadius(8)
-                                }
-                            }
-
-                            // Value text field
-                            HStack {
-                                TextField("Value", text: $field.value)
-                                    .textFieldStyle(.roundedBorder)
-
-                                if field.mappedKeypath != nil {
-                                    Button {
-                                        vm.resetField(id: field.id)
-                                    } label: {
-                                        Image(systemName: "arrow.counterclockwise")
-                                            .font(.caption)
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .tint(.indigo)
-                                    .help("Reset from JSON")
-                                }
                             }
                         }
-                        .padding(12)
-                        .background(Color(.systemGray6))
-                        .cornerRadius(10)
+
+                        // Signature size slider
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Size:")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Text("\(Int(vm.signatureSize.width)) × \(Int(vm.signatureSize.height))")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Slider(
+                                value: Binding(
+                                    get: { vm.signatureSize.width },
+                                    set: { newWidth in
+                                        // Maintain aspect ratio (2.5:1)
+                                        vm.signatureSize = CGSize(width: newWidth, height: newWidth / 2.5)
+                                    }
+                                ),
+                                in: 30...300,
+                                step: 5
+                            )
+                            .tint(.indigo)
+                        }
+
+                        HStack(spacing: 12) {
+                            Button {
+                                showSignatureCanvas = true
+                            } label: {
+                                Label("Edit", systemImage: "pencil")
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.indigo)
+
+                            Button {
+                                vm.clearSignature()
+                            } label: {
+                                Label("Clear", systemImage: "xmark")
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.red)
+                        }
+                    } else {
+                        Button {
+                            showSignatureCanvas = true
+                        } label: {
+                            HStack {
+                                Image(systemName: "pencil.tip.crop.circle")
+                                Text("Add Signature")
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 20)
+                            .background(Color(.systemGray5))
+                            .cornerRadius(10)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .stroke(style: StrokeStyle(lineWidth: 2, dash: [5]))
+                                    .foregroundColor(.gray.opacity(0.5))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(.secondary)
                     }
                 }
+                .padding(.vertical, 4)
 
                 Divider()
 
-                // Export actions
-                VStack(spacing: 12) {
-                    Button {
-                        vm.copyToClipboard()
-                        showCopiedToast = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                            showCopiedToast = false
-                        }
-                    } label: {
-                        Label("Copy Filled Data", systemImage: "doc.on.clipboard")
-                            .frame(maxWidth: .infinity)
+                // Completion indicator
+                VStack(spacing: 8) {
+                    HStack {
+                        Text("Form Completion")
+                            .font(.headline)
+                        Spacer()
+                        Text("\(Int(completionProgress * 100))%")
+                            .font(.headline)
+                            .foregroundColor(isComplete ? .green : .indigo)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.indigo)
-                    .controlSize(.large)
 
-                    Button {
-                        if let url = vm.generateFilledPDF() {
-                            exportPDFURL = url
-                            showShareSheet = true
+                    // Progress bar
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color(.systemGray5))
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(isComplete ? Color.green : Color.indigo)
+                                .frame(width: geo.size.width * completionProgress)
+                                .animation(.easeInOut(duration: 0.3), value: completionProgress)
                         }
-                    } label: {
-                        Label("Export Filled PDF", systemImage: "square.and.arrow.up")
-                            .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.bordered)
-                    .tint(.indigo)
-                    .controlSize(.large)
+                    .frame(height: 8)
+
+                    if isComplete {
+                        HStack {
+                            Image(systemName: "checkmark.seal.fill")
+                                .foregroundColor(.green)
+                            Text("All fields complete!")
+                                .font(.subheadline)
+                                .foregroundColor(.green)
+                        }
+                        .transition(.scale.combined(with: .opacity))
+                    }
                 }
+                .padding(.vertical, 8)
+
+                // Export action
+                Button {
+                    if let url = vm.generateFilledPDF() {
+                        Haptics.success()
+                        shareFile(url: url)
+                    }
+                } label: {
+                    Label("Export Filled PDF", systemImage: "square.and.arrow.up")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.indigo)
+                .controlSize(.large)
 
                 Divider()
 
                 Button("Start Over") {
+                    Haptics.warning()
                     vm.phase = .landing
                     vm.pages = []
                     vm.recognizedLines = []
                     vm.fields = []
                     vm.checkboxGroups = []
+                    vm.clearSignature()
                 }
                 .buttonStyle(.bordered)
                 .tint(.red)
@@ -520,6 +668,624 @@ struct KTCDemoView: View {
             .buttonStyle(.borderedProminent)
         }
         .padding()
+    }
+
+    // MARK: - Share Helper
+
+    private func shareFile(url: URL) {
+        let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = windowScene.windows.first?.rootViewController {
+            var topVC = rootVC
+            while let presented = topVC.presentedViewController {
+                topVC = presented
+            }
+            topVC.present(activityVC, animated: true)
+        }
+    }
+}
+
+// MARK: - Field Card (Cleaner UI)
+
+struct KTCFieldCard: View {
+    @Binding var field: KTCField
+    @ObservedObject var vm: KTCDemo
+
+    @State private var isExpanded = false
+
+    private var isMapped: Bool { field.mappedKeypath != nil }
+    private var hasValue: Bool { !field.value.isEmpty }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Main row - always visible
+            HStack(spacing: 10) {
+                // Status indicator
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+
+                // Label
+                Text(field.label)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+
+                Spacer()
+
+                // Confidence badge (if mapped)
+                if isMapped && field.matchConfidence > 0 {
+                    Text("\(Int(field.matchConfidence * 100))%")
+                        .font(.caption2)
+                        .fontWeight(.medium)
+                        .foregroundColor(confidenceColor.opacity(0.9))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(confidenceColor.opacity(0.15))
+                        .cornerRadius(4)
+                }
+
+                // Value preview or "Not mapped"
+                if hasValue {
+                    Text(field.value)
+                        .font(.subheadline)
+                        .foregroundColor(.indigo)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(minWidth: 60, maxWidth: 140, alignment: .trailing)
+                } else {
+                    Text(isMapped ? "Empty" : "Not mapped")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                // Expand/collapse chevron
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isExpanded.toggle()
+                }
+            }
+
+            // Expanded content
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 10) {
+                    Divider()
+
+                    // Mapping selector
+                    HStack {
+                        Text("Map to:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .frame(width: 50, alignment: .leading)
+
+                        Picker("", selection: Binding<String>(
+                            get: { field.mappedKeypath ?? "" },
+                            set: { newVal in
+                                let kp = newVal.isEmpty ? nil : newVal
+                                vm.updateFieldKeypath(id: field.id, newKeypath: kp)
+                            }
+                        )) {
+                            Text("— None —").tag("")
+                            ForEach(vm.sortedKeypaths, id: \.self) { kp in
+                                Text(vm.displayName(for: kp)).tag(kp)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .tint(.indigo)
+                        .labelsHidden()
+                    }
+
+                    // Value editor
+                    HStack {
+                        Text("Value:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .frame(width: 50, alignment: .leading)
+
+                        TextField("Enter value", text: $field.value)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.subheadline)
+
+                        if isMapped {
+                            Button {
+                                vm.resetField(id: field.id)
+                            } label: {
+                                Image(systemName: "arrow.counterclockwise")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.indigo)
+                        }
+                    }
+
+                    // Show detected value if different from current
+                    if let detected = field.detectedValue, !detected.isEmpty, detected != field.value {
+                        HStack {
+                            Text("Found:")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .frame(width: 50, alignment: .leading)
+
+                            Text(detected)
+                                .font(.caption)
+                                .foregroundColor(.orange)
+
+                            Spacer()
+
+                            Button("Use") {
+                                field.value = detected
+                            }
+                            .font(.caption)
+                            .buttonStyle(.bordered)
+                            .tint(.orange)
+                        }
+                    }
+
+                    // Match method info
+                    if let method = field.matchMethod {
+                        HStack {
+                            Text("Match:")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .frame(width: 50, alignment: .leading)
+                            Text(method)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+            }
+        }
+        .background(isMapped ? Color.indigo.opacity(0.05) : Color(.systemGray6))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isMapped ? Color.indigo.opacity(0.2) : Color.clear, lineWidth: 1)
+        )
+    }
+
+    private var statusColor: Color {
+        if isMapped && hasValue { return .green }
+        if isMapped { return .orange }
+        return .gray
+    }
+
+    private var confidenceColor: Color {
+        if field.matchConfidence >= 0.9 { return .green }
+        if field.matchConfidence >= 0.7 { return .blue }
+        if field.matchConfidence >= 0.5 { return .orange }
+        return .red
+    }
+}
+
+// MARK: - Feature Row
+
+struct FeatureRow: View {
+    let icon: String
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.subheadline)
+                .foregroundColor(.indigo)
+                .frame(width: 24)
+            Text(text)
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+// MARK: - Flow Layout (wrapping HStack)
+
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let result = arrangeSubviews(proposal: proposal, subviews: subviews)
+        return result.size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = arrangeSubviews(proposal: proposal, subviews: subviews)
+        for (index, position) in result.positions.enumerated() {
+            subviews[index].place(at: CGPoint(x: bounds.minX + position.x, y: bounds.minY + position.y), proposal: .unspecified)
+        }
+    }
+
+    private func arrangeSubviews(proposal: ProposedViewSize, subviews: Subviews) -> (size: CGSize, positions: [CGPoint]) {
+        let maxWidth = proposal.width ?? .infinity
+        var positions: [CGPoint] = []
+        var currentX: CGFloat = 0
+        var currentY: CGFloat = 0
+        var lineHeight: CGFloat = 0
+        var totalHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+
+            if currentX + size.width > maxWidth && currentX > 0 {
+                currentX = 0
+                currentY += lineHeight + spacing
+                lineHeight = 0
+            }
+
+            positions.append(CGPoint(x: currentX, y: currentY))
+            currentX += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+            totalHeight = currentY + lineHeight
+        }
+
+        return (CGSize(width: maxWidth, height: totalHeight), positions)
+    }
+}
+
+// MARK: - Stat Badge
+
+struct StatBadge: View {
+    let icon: String
+    let value: String
+    let label: String
+    var color: Color = .secondary
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.caption2)
+            Text(value)
+                .fontWeight(.medium)
+        }
+        .foregroundColor(color)
+        .frame(maxWidth: .infinity)
+    }
+}
+
+// MARK: - PDF Preview Sheet
+
+struct PDFPreviewSheet: View {
+    let url: URL
+    let onShare: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        NavigationView {
+            PDFKitView(url: url)
+                .navigationTitle("Preview")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") {
+                            onDismiss()
+                        }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button {
+                            Haptics.success()
+                            onShare()
+                        } label: {
+                            Label("Share", systemImage: "square.and.arrow.up")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.indigo)
+                    }
+                }
+        }
+    }
+}
+
+// MARK: - Share Sheet View
+
+struct ShareSheetView: UIViewControllerRepresentable {
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+
+    func makeUIViewController(context: Context) -> UIViewController {
+        // Create a wrapper view controller
+        let controller = UIViewController()
+        controller.view.backgroundColor = .clear
+
+        // Present the activity view controller after a brief delay
+        DispatchQueue.main.async {
+            let activityVC = UIActivityViewController(
+                activityItems: [url],
+                applicationActivities: nil
+            )
+
+            // Handle completion
+            activityVC.completionWithItemsHandler = { _, _, _, _ in
+                dismiss()
+            }
+
+            // For iPad - set source view
+            if let popover = activityVC.popoverPresentationController {
+                popover.sourceView = controller.view
+                popover.sourceRect = CGRect(x: controller.view.bounds.midX, y: controller.view.bounds.midY, width: 0, height: 0)
+                popover.permittedArrowDirections = []
+            }
+
+            controller.present(activityVC, animated: true)
+        }
+
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
+}
+
+struct PDFKitView: UIViewRepresentable {
+    let url: URL
+
+    func makeUIView(context: Context) -> PDFDisplayView {
+        let view = PDFDisplayView()
+        view.loadPDF(from: url)
+        return view
+    }
+
+    func updateUIView(_ uiView: PDFDisplayView, context: Context) {
+        uiView.loadPDF(from: url)
+    }
+}
+
+class PDFDisplayView: UIView {
+    private let scrollView = UIScrollView()
+    private let imageView = UIImageView()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    private func setup() {
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.minimumZoomScale = 1.0
+        scrollView.maximumZoomScale = 3.0
+        scrollView.delegate = self
+        scrollView.showsVerticalScrollIndicator = true
+        scrollView.showsHorizontalScrollIndicator = false
+        addSubview(scrollView)
+
+        imageView.contentMode = .scaleAspectFit
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.addSubview(imageView)
+
+        NSLayoutConstraint.activate([
+            scrollView.topAnchor.constraint(equalTo: topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            imageView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            imageView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            imageView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+            imageView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor)
+        ])
+    }
+
+    func loadPDF(from url: URL) {
+        guard let document = CGPDFDocument(url as CFURL),
+              let page = document.page(at: 1) else { return }
+
+        let pageRect = page.getBoxRect(.mediaBox)
+        let scale: CGFloat = 2.0  // Render at 2x for clarity
+        let size = CGSize(width: pageRect.width * scale, height: pageRect.height * scale)
+
+        UIGraphicsBeginImageContextWithOptions(size, true, 0)
+        guard let context = UIGraphicsGetCurrentContext() else { return }
+
+        context.setFillColor(UIColor.white.cgColor)
+        context.fill(CGRect(origin: .zero, size: size))
+
+        context.translateBy(x: 0, y: size.height)
+        context.scaleBy(x: scale, y: -scale)
+        context.drawPDFPage(page)
+
+        let image = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+
+        imageView.image = image
+    }
+}
+
+extension PDFDisplayView: UIScrollViewDelegate {
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+        return imageView
+    }
+}
+
+// MARK: - Signature Canvas
+
+struct KTCSignatureCanvas: View {
+    @Binding var signatureImage: UIImage?
+    let onSave: (UIImage?) -> Void
+    let onCancel: () -> Void
+
+    @State private var localSignature: UIImage? = nil
+
+    var body: some View {
+        NavigationView {
+            GeometryReader { geometry in
+                let isLandscape = geometry.size.width > geometry.size.height
+                let canvasHeight: CGFloat = isLandscape ? geometry.size.height - 120 : 200
+
+                VStack(spacing: 0) {
+                    // Instructions - compact in landscape
+                    if !isLandscape {
+                        Text("Sign below using your finger")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .padding()
+                    } else {
+                        Text("Sign here")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.vertical, 8)
+                    }
+
+                    // Canvas - expands in landscape
+                    // Light background so black signature strokes are visible
+                    SignatureCanvasRepresentable(signatureImage: $localSignature)
+                        .frame(height: canvasHeight)
+                        .background(Color(.systemGray6))
+                        .cornerRadius(12)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.indigo.opacity(0.5), lineWidth: 2)
+                        )
+                        .padding(.horizontal)
+
+                    // Clear button
+                    Button {
+                        localSignature = nil
+                    } label: {
+                        Label("Clear", systemImage: "trash")
+                            .font(.subheadline)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                    .padding(.vertical, isLandscape ? 8 : 16)
+
+                    if !isLandscape {
+                        Spacer()
+                    }
+                }
+            }
+            .background(Color(.systemGroupedBackground))
+            .navigationTitle("Add Signature")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        onCancel()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        onSave(localSignature)
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+        .onAppear {
+            localSignature = signatureImage
+        }
+    }
+}
+
+// MARK: - UIKit PKCanvasView Wrapper
+
+/// Simple drawing view for signatures using Core Graphics (works reliably with finger)
+class SignatureDrawingView: UIView {
+    private var path = UIBezierPath()
+    private var points: [CGPoint] = []
+    var onDrawingChanged: ((UIImage?) -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    private func setup() {
+        backgroundColor = .white  // Light background for visibility while signing
+        isOpaque = true
+        isMultipleTouchEnabled = false
+        path.lineWidth = 3.0
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+    }
+
+    override func draw(_ rect: CGRect) {
+        UIColor.black.setStroke()
+        path.stroke()
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let touch = touches.first else { return }
+        let point = touch.location(in: self)
+        path.move(to: point)
+        points.append(point)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let touch = touches.first else { return }
+        let point = touch.location(in: self)
+        path.addLine(to: point)
+        points.append(point)
+        setNeedsDisplay()
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        onDrawingChanged?(getImage())
+    }
+
+    func clear() {
+        path.removeAllPoints()
+        points.removeAll()
+        setNeedsDisplay()
+        onDrawingChanged?(nil)
+    }
+
+    func getImage() -> UIImage? {
+        guard !points.isEmpty else { return nil }
+        // Render with transparent background (false = not opaque)
+        UIGraphicsBeginImageContextWithOptions(bounds.size, false, UIScreen.main.scale)
+        guard let context = UIGraphicsGetCurrentContext() else { return nil }
+        // Clear the context to transparent
+        context.clear(bounds)
+        // Draw the signature path
+        UIColor.black.setStroke()
+        path.stroke()
+        let image = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+        return image
+    }
+
+    var hasSignature: Bool {
+        !points.isEmpty
+    }
+}
+
+struct SignatureCanvasRepresentable: UIViewRepresentable {
+    @Binding var signatureImage: UIImage?
+    var onClear: (() -> Void)?
+
+    func makeUIView(context: Context) -> SignatureDrawingView {
+        let view = SignatureDrawingView(frame: .zero)
+        view.onDrawingChanged = { image in
+            DispatchQueue.main.async {
+                self.signatureImage = image
+            }
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: SignatureDrawingView, context: Context) {
+        // If signatureImage is nil, clear the view
+        if signatureImage == nil && uiView.hasSignature {
+            uiView.clear()
+        }
     }
 }
 

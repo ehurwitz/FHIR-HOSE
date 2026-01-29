@@ -65,3 +65,7 @@ The app communicates with Charmonizer service for:
 - Async/await for API calls with proper error handling
 - Logger integration for debugging API interactions
 - Multi-platform deployment (iOS, macOS, visionOS)
+
+## Workflow Preferences
+
+- **Do NOT run xcodebuild**: Do not attempt to build or verify builds using xcodebuild commands. The user will build and test in Xcode manually.
