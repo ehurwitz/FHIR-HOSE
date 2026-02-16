@@ -170,7 +170,7 @@ struct KTCDemoView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 FeatureRow(icon: "camera.viewfinder", text: "Scan a form, paper or on-screen")
-                FeatureRow(icon: "text.viewfinder", text: "OCR detects form fields automatically")
+                FeatureRow(icon: "text.viewfinder", text: "Vision technology detects form fields")
                 FeatureRow(icon: "person.text.rectangle", text: "Patient data auto-fills matching fields")
                 FeatureRow(icon: "pencil.and.list.clipboard", text: "Review, edit, and export the result")
             }
