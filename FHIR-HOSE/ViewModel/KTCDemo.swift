@@ -41,6 +41,8 @@ struct KTCField: Identifiable {
     var valueBoundingBox: CGRect?  // Where the value was found
     var isChecked: Bool?  // For checkbox fields
     var adjustedValueBox: CGRect?  // User-adjusted position for the value (normalized Vision coords)
+    var isSkipped: Bool = false  // User marked as N/A / not applicable
+    var skippedValue: String?  // Stashed value before N/A, so Undo can restore it
 }
 
 /// Represents a detected checkbox on the form.
@@ -84,7 +86,7 @@ final class KTCDemo: ObservableObject {
     @Published var signatureImage: UIImage? = nil  // User's signature as UIImage
     @Published var hasSignature: Bool = false  // Whether user has signed
     @Published var signatureFieldId: UUID? = nil  // Which field to place signature at (if any)
-    @Published var signatureSize: CGSize = CGSize(width: 150, height: 60)  // Adjustable signature display size
+    @Published var signatureSize: CGSize = CGSize(width: 60, height: 24)  // Adjustable signature display size (at 400x600 reference scale)
     @Published var signatureNormalizedPosition: CGPoint? = nil  // Manual position in normalized coords (0-1)
 
     /// Sorted keypath list for Picker UI.
@@ -382,46 +384,52 @@ final class KTCDemo: ObservableObject {
                 continue
             }
 
-            // Use adjusted value box if user dragged it, otherwise calculate from label
+            // Compute font/text size first (needed for vertical centering)
+            let labelBox = field.labelBoundingBox
+            let labelH = labelBox.height * pageSize.height
+            let fontSize = max(10, min(18, labelH * 0.8))
+            let font = UIFont.systemFont(ofSize: fontSize, weight: .medium)
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: UIColor.black
+            ]
+            let valueStr = field.value as NSString
+            let textSize = valueStr.size(withAttributes: attributes)
+
+            // Calculate position — mirrors overlay's calculateDefaultValueRect logic
             let valueX: CGFloat
             let valueY: CGFloat
 
             if let adjustedBox = field.adjustedValueBox {
-                // User manually positioned this value
-                valueX = adjustedBox.origin.x * pageSize.width
-                valueY = (1.0 - adjustedBox.origin.y - adjustedBox.height) * pageSize.height
+                // The overlay positions the badge using .position(x: rect.midX, y: rect.midY).
+                // The badge has .padding(.horizontal, 6) so the text left edge is at
+                // badgeOriginX + 6pt in screen coords. We approximate this padding offset
+                // in normalized coords using the ratio: 6 / estimatedBadgeScreenWidth.
+                let charCount = CGFloat(field.value.count)
+                let estBadgeWidth = max(30.0, charCount * 6.0 + 16.0)
+                let padFraction = 10.0 / estBadgeWidth
+                valueX = (adjustedBox.origin.x + padFraction * adjustedBox.width) * pageSize.width
+
+                // Vertically center at the badge's center point
+                let centerPdfY = (1.0 - adjustedBox.origin.y - adjustedBox.height / 2) * pageSize.height
+                valueY = centerPdfY - textSize.height / 2
             } else {
-                // Calculate default position based on label
                 let box = field.labelBoundingBox
                 let x = box.origin.x * pageSize.width
                 let y = (1.0 - box.origin.y - box.height) * pageSize.height
                 let w = box.width * pageSize.width
                 let h = box.height * pageSize.height
 
-                // Place BELOW label if short, otherwise to the RIGHT
-                let labelLooksLikeHeader = field.label.count < 20 && !field.label.contains(":")
-                if labelLooksLikeHeader {
+                // Same heuristic as overlay: short labels without ":" → below, else → right
+                let isShortLabel = field.label.count < 20 && !field.label.contains(":")
+                if isShortLabel {
                     valueX = x
-                    valueY = y + h + 4
+                    valueY = y + h + 2  // just below label (matches overlay's +2 offset)
                 } else {
-                    valueX = x + w + 6
-                    valueY = y
+                    valueX = x + w + 4  // right of label (matches overlay's +4 offset)
+                    valueY = y + (h - textSize.height) / 2  // vertically centered with label
                 }
             }
-
-            let labelBox = field.labelBoundingBox
-            let h = labelBox.height * pageSize.height
-
-            // Font size proportional to bounding box height, clamped
-            let fontSize = max(10, min(18, h * 0.8))
-            let font = UIFont.systemFont(ofSize: fontSize, weight: .medium)
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: font,
-                .foregroundColor: UIColor(red: 0.1, green: 0.1, blue: 0.5, alpha: 1.0) // dark blue
-            ]
-
-            let valueStr = field.value as NSString
-            let textSize = valueStr.size(withAttributes: attributes)
 
             // Draw white background rect for legibility
             let textRect = CGRect(x: valueX - 2, y: valueY - 1, width: textSize.width + 4, height: textSize.height + 2)
@@ -444,10 +452,10 @@ final class KTCDemo: ObservableObject {
                 let y = (1.0 - normalizedPos.y) * pageSize.height - sigHeight / 2
                 sigRect = CGRect(x: x, y: y, width: sigWidth, height: sigHeight)
             } else if let field = self.signatureField {
-                // Use signature field location
+                // Place to the right of the label (like text values)
                 let box = field.labelBoundingBox
-                let x = box.origin.x * pageSize.width
-                let y = (1.0 - box.origin.y - box.height) * pageSize.height + 5
+                let x = (box.origin.x + box.width) * pageSize.width + 6
+                let y = (1.0 - box.origin.y - box.height) * pageSize.height
                 sigRect = CGRect(x: x, y: y, width: sigWidth, height: sigHeight)
             } else {
                 // Default: bottom right area

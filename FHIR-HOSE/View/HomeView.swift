@@ -79,8 +79,8 @@ struct HomeView: View {
 
                 NavigationLink(destination: KTCDemoView()) {
                     HealthAppCard(
-                        title: "KTC Demo",
-                        subtitle: "Scan a form → auto-fill",
+                        title: "Form Autofill",
+                        subtitle: "Scan & auto-fill medical forms",
                         systemImage: "doc.text.viewfinder",
                         color: .indigo
                     )

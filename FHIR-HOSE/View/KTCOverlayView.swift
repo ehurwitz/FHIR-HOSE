@@ -17,7 +17,7 @@ struct KTCOverlayView: View {
     var onFieldValueDrag: ((UUID, CGRect) -> Void)?  // fieldId, new normalized box
     var signatureImage: UIImage?
     var signatureField: KTCField?
-    var signatureSize: CGSize = CGSize(width: 150, height: 60)
+    var signatureSize: CGSize = CGSize(width: 60, height: 24)
     var signatureNormalizedPos: CGPoint? = nil  // Normalized position (0-1)
     var onSignatureDrag: ((CGPoint) -> Void)?  // Returns normalized position
 
@@ -112,19 +112,23 @@ struct KTCOverlayView: View {
                         }
                     }
 
-                    // Draw signature
+                    // Draw signature (scaled proportionally to fitted image)
                     if let sigImage = signatureImage, !isAddingField {
+                        let scaledSigSize = CGSize(
+                            width: signatureSize.width * (fittedRect.width / 400),
+                            height: signatureSize.height * (fittedRect.height / 600)
+                        )
                         let sigPos = calculateSignaturePosition(
                             normalizedPos: signatureNormalizedPos,
                             signatureField: signatureField,
-                            signatureSize: signatureSize,
+                            signatureSize: scaledSigSize,
                             fittedRect: fittedRect
                         )
 
                         SimpleDraggableSignature(
                             image: sigImage,
                             position: sigPos,
-                            size: signatureSize,
+                            size: scaledSigSize,
                             editMode: isEditingPositions,
                             fittedRect: fittedRect,
                             zoomScale: zoomScale,
@@ -149,13 +153,14 @@ struct KTCOverlayView: View {
                 y: fittedRect.origin.y + (1.0 - normalizedPos.y) * fittedRect.height
             )
         } else if let sigField = signatureField {
+            // Place to the right of the label (same approach as text value badges)
             let sigRect = Self.visionToSwiftUI(
                 visionBox: sigField.labelBoundingBox,
                 fittedRect: fittedRect
             )
             return CGPoint(
-                x: sigRect.minX + signatureSize.width / 2,
-                y: sigRect.maxY + signatureSize.height / 2 + 5
+                x: sigRect.maxX + signatureSize.width / 2 + 4,
+                y: sigRect.midY
             )
         } else {
             return CGPoint(x: fittedRect.midX, y: fittedRect.maxY - signatureSize.height)
@@ -654,7 +659,7 @@ struct ZoomableOverlayView: View {
     var onFieldValueDrag: ((UUID, CGRect) -> Void)?
     var signatureImage: UIImage?
     var signatureField: KTCField?
-    var signatureSize: CGSize = CGSize(width: 150, height: 60)
+    var signatureSize: CGSize = CGSize(width: 60, height: 24)
     var signatureNormalizedPos: CGPoint? = nil
     var onSignatureDrag: ((CGPoint) -> Void)?
 

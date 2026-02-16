@@ -45,13 +45,15 @@ struct KTCDemoView: View {
     @State private var showSignatureCanvas = false
     @State private var showPDFPreview = false
     @State private var previewPDFURL: URL?
+    @State private var showStartOverConfirmation = false
     private let logger = Logger(subsystem: "com.fhirhose.app", category: "KTCDemoView")
 
     // Completion tracking
     private var completionProgress: Double {
-        let totalFields = vm.fields.count + (vm.signatureField != nil ? 1 : 0)
+        let eligibleFields = vm.fields.filter { $0.fieldType != .signature && $0.fieldType != .checkbox && !$0.isSkipped }
+        let totalFields = eligibleFields.count + (vm.signatureField != nil ? 1 : 0)
         guard totalFields > 0 else { return 0 }
-        let filledFields = vm.fields.filter { !$0.value.isEmpty }.count
+        let filledFields = eligibleFields.filter { !$0.value.isEmpty }.count
         let signatureFilled = vm.hasSignature ? 1 : 0
         return Double(filledFields + signatureFilled) / Double(totalFields)
     }
@@ -75,7 +77,7 @@ struct KTCDemoView: View {
                 errorView(message)
             }
         }
-        .navigationTitle("KTC Demo")
+        .navigationTitle("Form Autofill")
         .navigationBarTitleDisplayMode(.inline)
         .fullScreenCover(isPresented: $showScanner) {
             KTCDocumentScanner(
@@ -155,7 +157,7 @@ struct KTCDemoView: View {
                     .font(.system(size: 60))
                     .foregroundColor(.indigo)
 
-                Text("Kill-The-Clipboard")
+                Text("Form Autofill (KTC Demo)")
                     .font(.largeTitle)
                     .fontWeight(.bold)
                     .multilineTextAlignment(.center)
@@ -167,9 +169,9 @@ struct KTCDemoView: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                FeatureRow(icon: "camera.viewfinder", text: "Scan or photograph a paper form")
-                FeatureRow(icon: "text.viewfinder", text: "OCR detects field labels automatically")
-                FeatureRow(icon: "person.text.rectangle", text: "Patient data is fuzzy-matched to fields")
+                FeatureRow(icon: "camera.viewfinder", text: "Scan a form, paper or on-screen")
+                FeatureRow(icon: "text.viewfinder", text: "OCR detects form fields automatically")
+                FeatureRow(icon: "person.text.rectangle", text: "Patient data auto-fills matching fields")
                 FeatureRow(icon: "pencil.and.list.clipboard", text: "Review, edit, and export the result")
             }
             .padding()
@@ -238,10 +240,10 @@ struct KTCDemoView: View {
                     .shadow(radius: 4)
             }
 
-            ProgressView("Analyzing scan...")
+            ProgressView("Detecting fields...")
                 .font(.headline)
 
-            Text("OCR processing coming next milestone.")
+            Text("Running OCR and matching patient data")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
@@ -280,31 +282,6 @@ struct KTCDemoView: View {
                             .padding(8)
                     }
                 }
-
-                // Controls row
-                VStack(spacing: 8) {
-                    HStack {
-                        Toggle("Boxes", isOn: $showLabelBoxes)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                        Text("Label boxes")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Spacer()
-                    }
-
-                    // Stats in a flexible grid
-                    let matched = vm.fields.filter { $0.mappedKeypath != nil }.count
-                    let detected = vm.fields.filter { $0.detectedValue != nil }.count
-                    HStack(spacing: 12) {
-                        StatBadge(icon: "text.alignleft", value: "\(vm.recognizedLines.count)", label: "lines")
-                        StatBadge(icon: "tag", value: "\(vm.fields.count)", label: "fields")
-                        StatBadge(icon: "doc.text.magnifyingglass", value: "\(detected)", label: "detected", color: detected > 0 ? .orange : .secondary)
-                        StatBadge(icon: "checkmark.circle", value: "\(matched)", label: "matched", color: matched > 0 ? .green : .secondary)
-                    }
-                }
-                .font(.caption)
-                .foregroundColor(.secondary)
 
                 Divider()
 
@@ -399,152 +376,61 @@ struct KTCDemoView: View {
                     }
                     .padding(.vertical, 30)
                 } else if !vm.fields.isEmpty {
-                    // Text Fields Header
-                    HStack {
-                        Image(systemName: "text.cursor")
-                            .foregroundColor(.indigo)
-                        Text("Text Fields")
-                            .font(.headline)
-                        Spacer()
-                        let matched = vm.fields.filter { $0.mappedKeypath != nil }.count
-                        Text("\(matched)/\(vm.fields.count) mapped")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.top, 4)
-
-                    ForEach($vm.fields) { $field in
-                        KTCFieldCard(field: $field, vm: vm)
-                    }
-                }
-
-                Divider()
-
-                // Signature Section
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Image(systemName: "signature")
-                            .foregroundColor(.indigo)
-                        Text("Signature")
-                            .font(.headline)
-                        Spacer()
-                        if vm.hasSignature {
+                    // "Auto-filled" section — mapped fields with values OR skipped (N/A) fields, excluding signature/checkbox types
+                    let autoFilledCount = vm.fields.filter {
+                        $0.fieldType != .signature && $0.fieldType != .checkbox &&
+                        ($0.isSkipped || ($0.mappedKeypath != nil && !$0.value.isEmpty))
+                    }.count
+                    if autoFilledCount > 0 {
+                        HStack {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundColor(.green)
+                            Text("Auto-filled")
+                                .font(.headline)
+                            Spacer()
+                            Text("\(autoFilledCount) fields")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.top, 4)
+
+                        ForEach($vm.fields) { $field in
+                            if field.fieldType != .signature && field.fieldType != .checkbox &&
+                               (field.isSkipped || (field.mappedKeypath != nil && !field.value.isEmpty)) {
+                                KTCFieldCard(field: $field, vm: vm)
+                            }
                         }
                     }
 
-                    if vm.hasSignature {
-                        // Show signature preview (transparent background, just the strokes)
-                        if let sigImage = vm.signatureImage {
-                            Image(uiImage: sigImage)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(height: 60)
-                                .padding(8)
-                                .background(
-                                    // Checkerboard pattern to show transparency
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .fill(Color(.systemGray5))
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                                )
-                        }
+                    // Inline Signature Section
+                    signatureInlineView
 
-                        // Signature placement picker
-                        let signatureFields = vm.fields.filter { $0.fieldType == .signature || $0.label.lowercased().contains("sign") }
-                        if !signatureFields.isEmpty {
-                            HStack {
-                                Text("Place at:")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Picker("", selection: Binding<String>(
-                                    get: { vm.signatureFieldId?.uuidString ?? "" },
-                                    set: { newVal in
-                                        if newVal.isEmpty {
-                                            vm.setSignatureField(id: nil)
-                                        } else if let uuid = UUID(uuidString: newVal) {
-                                            vm.setSignatureField(id: uuid)
-                                        }
-                                    }
-                                )) {
-                                    Text("Auto").tag("")
-                                    ForEach(signatureFields) { field in
-                                        Text(field.label).tag(field.id.uuidString)
-                                    }
-                                }
-                                .pickerStyle(.menu)
-                                .tint(.indigo)
-                            }
+                    // "Needs Review" section — unmapped or empty fields (not skipped), excluding signature/checkbox types
+                    let needsReviewCount = vm.fields.filter {
+                        $0.fieldType != .signature && $0.fieldType != .checkbox &&
+                        !$0.isSkipped && ($0.mappedKeypath == nil || $0.value.isEmpty)
+                    }.count
+                    if needsReviewCount > 0 {
+                        HStack {
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .foregroundColor(.orange)
+                            Text("Needs Review")
+                                .font(.headline)
+                            Spacer()
+                            Text("\(needsReviewCount) fields")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         }
+                        .padding(.top, 8)
 
-                        // Signature size slider
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("Size:")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Spacer()
-                                Text("\(Int(vm.signatureSize.width)) × \(Int(vm.signatureSize.height))")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                        ForEach($vm.fields) { $field in
+                            if field.fieldType != .signature && field.fieldType != .checkbox &&
+                               !field.isSkipped && (field.mappedKeypath == nil || field.value.isEmpty) {
+                                KTCFieldCard(field: $field, vm: vm)
                             }
-                            Slider(
-                                value: Binding(
-                                    get: { vm.signatureSize.width },
-                                    set: { newWidth in
-                                        // Maintain aspect ratio (2.5:1)
-                                        vm.signatureSize = CGSize(width: newWidth, height: newWidth / 2.5)
-                                    }
-                                ),
-                                in: 30...300,
-                                step: 5
-                            )
-                            .tint(.indigo)
                         }
-
-                        HStack(spacing: 12) {
-                            Button {
-                                showSignatureCanvas = true
-                            } label: {
-                                Label("Edit", systemImage: "pencil")
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(.indigo)
-
-                            Button {
-                                vm.clearSignature()
-                            } label: {
-                                Label("Clear", systemImage: "xmark")
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(.red)
-                        }
-                    } else {
-                        Button {
-                            showSignatureCanvas = true
-                        } label: {
-                            HStack {
-                                Image(systemName: "pencil.tip.crop.circle")
-                                Text("Add Signature")
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 20)
-                            .background(Color(.systemGray5))
-                            .cornerRadius(10)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .stroke(style: StrokeStyle(lineWidth: 2, dash: [5]))
-                                    .foregroundColor(.gray.opacity(0.5))
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundColor(.secondary)
                     }
                 }
-                .padding(.vertical, 4)
 
                 Divider()
 
@@ -603,15 +489,23 @@ struct KTCDemoView: View {
 
                 Button("Start Over") {
                     Haptics.warning()
-                    vm.phase = .landing
-                    vm.pages = []
-                    vm.recognizedLines = []
-                    vm.fields = []
-                    vm.checkboxGroups = []
-                    vm.clearSignature()
+                    showStartOverConfirmation = true
                 }
                 .buttonStyle(.bordered)
                 .tint(.red)
+                .alert("Start Over?", isPresented: $showStartOverConfirmation) {
+                    Button("Cancel", role: .cancel) { }
+                    Button("Clear Everything", role: .destructive) {
+                        vm.phase = .landing
+                        vm.pages = []
+                        vm.recognizedLines = []
+                        vm.fields = []
+                        vm.checkboxGroups = []
+                        vm.clearSignature()
+                    }
+                } message: {
+                    Text("This will discard all scanned data, field mappings, and your signature.")
+                }
             }
             .padding()
         }
@@ -634,15 +528,6 @@ struct KTCDemoView: View {
                 .animation(.easeInOut, value: showCopiedToast)
             }
         }
-    }
-
-    // MARK: - Helpers
-
-    private func confidenceColor(_ confidence: Double) -> Color {
-        if confidence >= 0.9 { return .green }
-        if confidence >= 0.7 { return .blue }
-        if confidence >= 0.5 { return .orange }
-        return .red
     }
 
     // MARK: - Error
@@ -668,6 +553,134 @@ struct KTCDemoView: View {
             .buttonStyle(.borderedProminent)
         }
         .padding()
+    }
+
+    // MARK: - Signature Inline View
+
+    private var signatureInlineView: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Divider()
+
+            HStack {
+                Image(systemName: "signature")
+                    .foregroundColor(.indigo)
+                Text("Signature")
+                    .font(.headline)
+                Spacer()
+                if vm.hasSignature {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                }
+            }
+
+            if vm.hasSignature {
+                if let sigImage = vm.signatureImage {
+                    Image(uiImage: sigImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 60)
+                        .padding(8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color(white: 0.9))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                        )
+                }
+
+                let signatureFields = vm.fields.filter { $0.fieldType == .signature || $0.label.lowercased().contains("sign") }
+                if !signatureFields.isEmpty {
+                    HStack {
+                        Text("Place at:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Picker("", selection: Binding<String>(
+                            get: { vm.signatureFieldId?.uuidString ?? "" },
+                            set: { newVal in
+                                if newVal.isEmpty {
+                                    vm.setSignatureField(id: nil)
+                                } else if let uuid = UUID(uuidString: newVal) {
+                                    vm.setSignatureField(id: uuid)
+                                }
+                            }
+                        )) {
+                            Text("Auto").tag("")
+                            ForEach(signatureFields) { field in
+                                Text(field.label).tag(field.id.uuidString)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .tint(.indigo)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Size:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text("\(Int(vm.signatureSize.width)) × \(Int(vm.signatureSize.height))")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { vm.signatureSize.width },
+                            set: { newWidth in
+                                vm.signatureSize = CGSize(width: newWidth, height: newWidth / 2.5)
+                            }
+                        ),
+                        in: 20...120,
+                        step: 5
+                    )
+                    .tint(.indigo)
+                }
+
+                HStack(spacing: 12) {
+                    Button {
+                        showSignatureCanvas = true
+                    } label: {
+                        Label("Edit", systemImage: "pencil")
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.indigo)
+
+                    Button {
+                        vm.clearSignature()
+                    } label: {
+                        Label("Clear", systemImage: "xmark")
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                }
+            } else {
+                Button {
+                    showSignatureCanvas = true
+                } label: {
+                    HStack {
+                        Image(systemName: "pencil.tip.crop.circle")
+                        Text("Add Signature")
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
+                    .background(Color(.systemGray5))
+                    .cornerRadius(10)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(style: StrokeStyle(lineWidth: 2, dash: [5]))
+                            .foregroundColor(.gray.opacity(0.5))
+                    )
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+            }
+
+            Divider()
+        }
+        .padding(.vertical, 4)
     }
 
     // MARK: - Share Helper
@@ -711,29 +724,27 @@ struct KTCFieldCard: View {
                     .font(.subheadline)
                     .fontWeight(.medium)
                     .lineLimit(1)
+                    .strikethrough(field.isSkipped, color: .secondary)
 
                 Spacer()
 
-                // Confidence badge (if mapped)
-                if isMapped && field.matchConfidence > 0 {
-                    Text("\(Int(field.matchConfidence * 100))%")
-                        .font(.caption2)
+                // Value preview, N/A badge, or status
+                if field.isSkipped {
+                    Text("N/A")
+                        .font(.caption)
                         .fontWeight(.medium)
-                        .foregroundColor(confidenceColor.opacity(0.9))
-                        .padding(.horizontal, 5)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(confidenceColor.opacity(0.15))
+                        .background(Color(.systemGray4).opacity(0.5))
                         .cornerRadius(4)
-                }
-
-                // Value preview or "Not mapped"
-                if hasValue {
+                } else if hasValue {
                     Text(field.value)
                         .font(.subheadline)
                         .foregroundColor(.indigo)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .frame(minWidth: 60, maxWidth: 140, alignment: .trailing)
+                        .frame(minWidth: 60, alignment: .trailing)
                 } else {
                     Text(isMapped ? "Empty" : "Not mapped")
                         .font(.caption)
@@ -829,42 +840,52 @@ struct KTCFieldCard: View {
                         }
                     }
 
-                    // Match method info
-                    if let method = field.matchMethod {
-                        HStack {
-                            Text("Match:")
+                    // N/A toggle
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            if field.isSkipped {
+                                // Undo: restore stashed value
+                                field.isSkipped = false
+                                if let stashed = field.skippedValue {
+                                    field.value = stashed
+                                    field.skippedValue = nil
+                                }
+                            } else {
+                                // Mark N/A: stash current value and clear it
+                                field.skippedValue = field.value
+                                field.value = ""
+                                field.isSkipped = true
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: field.isSkipped ? "arrow.uturn.backward" : "minus.circle")
                                 .font(.caption)
-                                .foregroundColor(.secondary)
-                                .frame(width: 50, alignment: .leading)
-                            Text(method)
+                            Text(field.isSkipped ? "Undo N/A" : "Mark as N/A")
                                 .font(.caption)
-                                .foregroundColor(.secondary)
                         }
                     }
+                    .buttonStyle(.bordered)
+                    .tint(field.isSkipped ? .indigo : .orange)
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
             }
         }
-        .background(isMapped ? Color.indigo.opacity(0.05) : Color(.systemGray6))
+        .background(isMapped || field.isSkipped ? Color.indigo.opacity(0.05) : Color(.systemGray6))
         .cornerRadius(8)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(isMapped ? Color.indigo.opacity(0.2) : Color.clear, lineWidth: 1)
+                .stroke(isMapped || field.isSkipped ? Color.indigo.opacity(0.2) : Color.clear, lineWidth: 1)
         )
+        .opacity(field.isSkipped ? 0.7 : 1.0)
     }
 
     private var statusColor: Color {
+        if field.isSkipped { return .green }
         if isMapped && hasValue { return .green }
         if isMapped { return .orange }
         return .gray
-    }
-
-    private var confidenceColor: Color {
-        if field.matchConfidence >= 0.9 { return .green }
-        if field.matchConfidence >= 0.7 { return .blue }
-        if field.matchConfidence >= 0.5 { return .orange }
-        return .red
     }
 }
 
